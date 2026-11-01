@@ -1,0 +1,30 @@
+name: Compile SO Library
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+
+      - name: Build with ndk-build
+        run: |
+          cd bycmd
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./jni/Android.mk NDK_APPLICATION_MK=./jni/Application.mk
+
+      - name: Upload Compiled SO
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-so-file
+          path: bycmd/libs/arm64-v8a/*.so

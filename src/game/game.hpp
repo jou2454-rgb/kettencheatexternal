@@ -140,6 +140,7 @@ namespace il2cpp {
     inline uint64_t g_cache_lib = 0;
     struct klass_names { std::string name, ns; };
     inline std::unordered_map<uint64_t, klass_names> g_names;
+    inline uint64_t g_camera_klass = 0;
 
     inline void invalidate_if_context_changed() {
         if (g_cache_pid != proc::pid || g_cache_lib != proc::lib) {
@@ -251,8 +252,6 @@ namespace il2cpp {
         if (ns.empty()) return name;
         return ns + "." + name;
     }
-
-    inline uint64_t g_camera_klass = 0;
 
     inline uint64_t camera_klass_ptr() {
         if (!g_camera_klass && proc::lib) {
@@ -1102,8 +1101,17 @@ inline uint64_t main_camera_native(uint64_t local_player) {
 // No hardcoded 0x70/0xB0: first stable pair wins and is cached.
 inline bool detect_main_cam_offsets(uint64_t native, matrix& view, matrix& projection) {
     if (g_main_cam.native == native && g_main_cam.view_off >= 0 && g_main_cam.confirm >= 3) {
-        if (!mem_read(uint64_t(native + g_main_cam.view_off), &view, sizeof(view))) return false;
-        if (!mem_read(uint64_t(native + g_main_cam.proj_off), &projection, sizeof(projection))) return false;
+        const int vo = g_main_cam.view_off;
+        const int po = g_main_cam.proj_off;
+        if (po == vo + 64) {
+            uint8_t block[128];
+            if (!mem_read(uint64_t(native + vo), block, 128)) return false;
+            std::memcpy(&view, block, 64);
+            std::memcpy(&projection, block + 64, 64);
+        } else {
+            if (!mem_read(uint64_t(native + vo), &view, sizeof(view))) return false;
+            if (!mem_read(uint64_t(native + po), &projection, sizeof(projection))) return false;
+        }
         const float* v = reinterpret_cast<const float*>(&view);
         const float* p = reinterpret_cast<const float*>(&projection);
         if (matrix_window_sane(v, true) && matrix_window_sane(p, false)) return true;

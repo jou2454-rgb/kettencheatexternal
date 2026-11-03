@@ -1,0 +1,29 @@
+name: Build ARM64 Binary
+
+on:
+  push:
+    branches: [ "main", "claude/*" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Build with ndk-build
+        run: |
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./jni/Android.mk NDK_APPLICATION_MK=./jni/Application.mk
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeeww-arm64
+          path: libs/arm64-v8a/eeeww

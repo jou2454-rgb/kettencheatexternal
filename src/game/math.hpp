@@ -26,8 +26,12 @@ inline bool world_to_screen(const Vector3& pos, const matrix& view, const matrix
     float nx = clip.x / clip.w;
     float ny = clip.y / clip.w;
 
-    out.x = (nx + 1.f) * 0.5f * g_sw;
-    out.y = (1.f - ny) * 0.5f * g_sh;
+    const float vw = g_vw > 1.f ? g_vw : g_sw;
+    const float vh = g_vh > 1.f ? g_vh : g_sh;
+    const float vx = g_vw > 1.f ? g_vx : 0.f;
+    const float vy = g_vh > 1.f ? g_vy : 0.f;
+    out.x = (nx + 1.f) * 0.5f * vw + vx;
+    out.y = (1.f - ny) * 0.5f * vh + vy;
 
     return out.x > -g_sw && out.x < g_sw * 2.f && out.y > -g_sh && out.y < g_sh * 2.f;
 }

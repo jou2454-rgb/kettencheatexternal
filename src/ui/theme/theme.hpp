@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 inline float g_sw, g_sh;
+inline float g_vw, g_vh, g_vx, g_vy;
 
 namespace ui {
 

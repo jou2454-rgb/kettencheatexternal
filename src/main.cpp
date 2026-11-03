@@ -47,6 +47,7 @@ int main() {
 
     g_sw = static_cast<float>(max_size);
     g_sh = static_cast<float>(min_size);
+    g_vw = g_sw; g_vh = g_sh; g_vx = 0.f; g_vy = 0.f;
 
     native_window_screen_x = max_size;
     native_window_screen_y = max_size;

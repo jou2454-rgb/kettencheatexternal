@@ -209,6 +209,28 @@ void visuals::draw() {
         }
     }
 
+    {
+        const float* p = reinterpret_cast<const float*>(&ProjectionMatrix);
+        g_vw = g_sw; g_vh = g_sh; g_vx = 0.f; g_vy = 0.f;
+        if (p[0] > 0.01f && p[5] > 0.01f) {
+            float cam_aspect = p[5] / p[0];
+            float scr_aspect = g_sw / g_sh;
+            if (cam_aspect < scr_aspect - 0.02f) {
+                g_vw = g_sh * cam_aspect;
+                g_vx = (g_sw - g_vw) * 0.5f;
+            } else if (cam_aspect > scr_aspect + 0.02f) {
+                g_vh = g_sw / cam_aspect;
+                g_vy = (g_sh - g_vh) * 0.5f;
+            }
+        }
+        static long long vp_log = 0;
+        if (diag::every(vp_log, 10000))
+            diag::log("VIEWPORT", "screen=%.0fx%.0f viewport=%.0fx%.0f+%.0f+%.0f aspect_cam=%.4f aspect_scr=%.4f p0=%.4f p5=%.4f",
+                      g_sw, g_sh, g_vw, g_vh, g_vx, g_vy,
+                      (p[0] > 0.01f && p[5] > 0.01f) ? p[5]/p[0] : 0.f,
+                      g_sw / g_sh, p[0], p[5]);
+    }
+
     for (const auto& Enemy : frame_enemies) {
         const uint64_t Player = Enemy.object;
         const Vector3 PlayerPosition = Enemy.position;
@@ -468,7 +490,11 @@ void visuals::dline(const ImVec2& foot, float a) {
         static_cast<int>(cfg::esp::line_col.z * 255),
         static_cast<int>(cfg::esp::line_col.w * 255 * a)
     );
-    dl->AddLine(ImVec2(g_sw * 0.5f, g_sh), foot, col, 1.f);
+    const float vw = g_vw > 1.f ? g_vw : g_sw;
+    const float vh = g_vh > 1.f ? g_vh : g_sh;
+    const float vx = g_vw > 1.f ? g_vx : 0.f;
+    const float vy = g_vh > 1.f ? g_vy : 0.f;
+    dl->AddLine(ImVec2(vx + vw * 0.5f, vy + vh), foot, col, 1.f);
 }
 
 void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {

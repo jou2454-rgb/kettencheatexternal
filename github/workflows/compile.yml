@@ -1,8 +1,8 @@
-name: Compile SO Library
+name: Build ARM64 Binary
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "claude/*" ]
   workflow_dispatch:
 
 jobs:
@@ -16,15 +16,14 @@ jobs:
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r25b
+          ndk-version: r27c
 
       - name: Build with ndk-build
         run: |
-          cd bycmd
           ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./jni/Android.mk NDK_APPLICATION_MK=./jni/Application.mk
 
-      - name: Upload Compiled SO
+      - name: Upload Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-so-file
-          path: bycmd/libs/arm64-v8a/*.so
+          name: eeeww-arm64
+          path: libs/arm64-v8a/eeeww

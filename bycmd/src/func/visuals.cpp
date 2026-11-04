@@ -52,25 +52,13 @@ static Vector3 smooth_position(uint64_t object, const Vector3& raw) {
         entry.prev = entry.current;
         entry.current = raw;
     }
-    float lerp_speed = std::clamp(dt * 15.f, 0.f, 1.f);
+    float lerp_speed = std::clamp(dt * 30.f, 0.f, 1.f);
     entry.display.x += (raw.x - entry.display.x) * lerp_speed;
     entry.display.y += (raw.y - entry.display.y) * lerp_speed;
     entry.display.z += (raw.z - entry.display.z) * lerp_speed;
     return entry.display;
 }
 
-// ---- Camera matrix smoothing state ----
-static matrix g_prev_view{};
-static matrix g_prev_proj{};
-static bool g_prev_cam_valid = false;
-
-static void lerp_matrix(matrix& out, const matrix& a, const matrix& b, float t) {
-    const float* fa = reinterpret_cast<const float*>(&a);
-    const float* fb = reinterpret_cast<const float*>(&b);
-    float* fo = reinterpret_cast<float*>(&out);
-    for (int i = 0; i < 16; ++i)
-        fo[i] = fa[i] + (fb[i] - fa[i]) * t;
-}
 
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
@@ -159,15 +147,6 @@ void visuals::draw() {
 
     matrix ViewMatrix = cam.view;
     matrix ProjectionMatrix = cam.projection;
-
-    // Smooth camera matrices to prevent micro-jitter
-    if (g_prev_cam_valid) {
-        lerp_matrix(ViewMatrix, g_prev_view, cam.view, 0.6f);
-        lerp_matrix(ProjectionMatrix, g_prev_proj, cam.projection, 0.6f);
-    }
-    g_prev_view = cam.view;
-    g_prev_proj = cam.projection;
-    g_prev_cam_valid = true;
 
     for (const auto& Enemy : frame_enemies) {
         const uint64_t Player = Enemy.object;

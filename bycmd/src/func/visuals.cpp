@@ -37,60 +37,78 @@ static void update_name_cache(const std::vector<uint64_t>& players) {
     }
 }
 
-// ---- Camera resolution: 3 tiers ----
-// Tier 1: main_camera_matrices() — il2cpp-resolved native Camera, real V/P
-// Tier 2: camera_candidates() with detect_pair (view_off >= 0) — native with real V/P
-// Tier 3: camera_fallback_candidates() — Transform-built V/P (has displacement)
-static bool resolve_camera(uint64_t local_player, const Vector3& local_pos,
-                           matrix& out_view, matrix& out_proj) {
-    // Tier 1: direct il2cpp chain -> native Camera -> detect_pair
+// ---- Camera resolution with caching ----
+// Heavy resolve (il2cpp, detect_pair scans) runs at most once per 2 seconds.
+// Fast path: re-read cached address + offsets (2 rpm calls).
+struct cam_cache {
+    uint64_t addr{};
+    int view_off{-1};
+    int proj_off{-1};
+    int tier{0};
+    long long resolved_at{0};
+};
+static cam_cache s_cam;
+
+static bool cam_fast_read(const cam_cache& c, matrix& v, matrix& p) {
+    if (!c.addr || c.view_off < 0) return false;
+    if (!mem_read(uint64_t(c.addr + c.view_off), &v, sizeof(v))) return false;
+    if (!mem_read(uint64_t(c.addr + c.proj_off), &p, sizeof(p))) return false;
+    const float* vf = reinterpret_cast<const float*>(&v);
+    const float* pf = reinterpret_cast<const float*>(&p);
+    float vsum = 0, psum = 0;
+    for (int i = 0; i < 16; ++i) { vsum += fabsf(vf[i]); psum += fabsf(pf[i]); }
+    return vsum > 0.01f && psum > 0.01f;
+}
+
+static bool resolve_camera_heavy(uint64_t local_player, const Vector3& local_pos,
+                                 matrix& out_view, matrix& out_proj) {
+    // Tier 1: main_camera_matrices — il2cpp chain -> native Camera -> detect_pair
     {
         uint64_t native = 0;
         if (main_camera_matrices(local_player, native, out_view, out_proj)) {
+            if (g_main_cam.view_off >= 0 && g_main_cam.confirm >= 3) {
+                s_cam = {native, g_main_cam.view_off, g_main_cam.proj_off, 1, diag::now_ms()};
+            }
+            g_camera = native;
             static long long t1_log = 0;
             if (diag::every(t1_log, 5000))
                 diag::log("CAMERA", "tier1 native=0x%llx", (unsigned long long)native);
-            g_camera = native;
             return true;
         }
     }
-
-    // Tier 2: camera_candidates (probed native objects with detect_pair)
+    // Tier 2: camera_candidates with detect_pair only
     {
         std::vector<camera_candidate> cams = camera_candidates(local_player);
-        // Pick the one closest to local player with valid detect_pair offsets
         float best_dist = 1e9f;
-        bool found = false;
+        const camera_candidate* best = nullptr;
         for (const auto& c : cams) {
-            if (c.view_off < 0) continue; // skip non-detect_pair
+            if (c.view_off < 0) continue;
             const float* v = reinterpret_cast<const float*>(&c.view);
             const Vector3 cam_pos(
                 -(v[0]*v[12] + v[1]*v[13] + v[2]*v[14]),
                 -(v[4]*v[12] + v[5]*v[13] + v[6]*v[14]),
                 -(v[8]*v[12] + v[9]*v[13] + v[10]*v[14]));
             float d = calculate_distance(cam_pos, local_pos);
-            if (d < best_dist) {
-                best_dist = d;
-                out_view = c.view;
-                out_proj = c.projection;
-                g_camera = c.address;
-                found = true;
-            }
+            if (d < best_dist) { best_dist = d; best = &c; }
         }
-        if (found && best_dist < 30.f) {
+        if (best && best_dist < 30.f) {
+            out_view = best->view;
+            out_proj = best->projection;
+            s_cam = {best->address, best->view_off, best->proj_off, 2, diag::now_ms()};
+            g_camera = best->address;
             static long long t2_log = 0;
             if (diag::every(t2_log, 5000))
                 diag::log("CAMERA", "tier2 cam=0x%llx dist=%.1f", (unsigned long long)g_camera, best_dist);
             return true;
         }
     }
-
     // Tier 3: transform fallback (last resort, may have displacement)
     {
         std::vector<camera_candidate> fb = player::camera_fallback_candidates(local_player);
         if (!fb.empty()) {
             out_view = fb[0].view;
             out_proj = fb[0].projection;
+            s_cam = {fb[0].address, fb[0].view_off, fb[0].proj_off, 3, diag::now_ms()};
             g_camera = fb[0].address;
             static long long t3_log = 0;
             if (diag::every(t3_log, 5000))
@@ -98,8 +116,22 @@ static bool resolve_camera(uint64_t local_player, const Vector3& local_pos,
             return true;
         }
     }
-
     return false;
+}
+
+static bool resolve_camera(uint64_t local_player, const Vector3& local_pos,
+                           matrix& out_view, matrix& out_proj) {
+    const long long now = diag::now_ms();
+    // Fast path: use cached address + offsets (2 rpm reads, no scanning)
+    if (s_cam.addr && s_cam.view_off >= 0 && (now - s_cam.resolved_at < 2000)) {
+        if (cam_fast_read(s_cam, out_view, out_proj)) {
+            g_camera = s_cam.addr;
+            return true;
+        }
+        s_cam = {};
+    }
+    // Heavy path: full resolution (throttled to once per 2s)
+    return resolve_camera_heavy(local_player, local_pos, out_view, out_proj);
 }
 
 void visuals::draw() {

@@ -1,0 +1,44 @@
+name: Build bycmd ARM64
+
+on:
+  push:
+    branches: [ "main", "claude/*" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+
+      - name: Build with ndk-build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd bycmd
+          $ANDROID_NDK_HOME/ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./jni/Android.mk \
+            NDK_APPLICATION_MK=./jni/Application.mk \
+            -j$(nproc)
+
+      - name: Rename binary
+        run: |
+          mkdir -p output
+          cp bycmd/libs/arm64-v8a/eeeww output/bycmd-1.0.0
+          chmod +x output/bycmd-1.0.0
+          ls -la output/
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bycmd-arm64
+          path: output/bycmd-1.0.0

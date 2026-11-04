@@ -415,19 +415,6 @@ namespace player {
         if (!exact_class(stats, stats_class)) return 0;
         uint16_t hp = rpm<uint16_t>(stats + v100::stats_hp);
         uint16_t max_hp = rpm<uint16_t>(stats + v100::stats_max_hp);
-        if (max_hp == 0 || max_hp > 10000 || hp > max_hp) return 0;
-        if (hp == 0) return 0;
-        return int(hp);
-    }
-
-    inline bool alive(uint64_t p) noexcept {
-        if (!p) return false;
-        int hp = health(p);
-        if (hp <= 0) return false;
-        uint64_t parts = rpm<uint64_t>(p + v100::player_parts);
-        if (!plausible(parts)) return false;
-        uint64_t world = rpm<uint64_t>(p + v100::player_world);
-        if (!plausible(world)) return false;
-        return true;
+        return max_hp > 0 && max_hp <= 10000 && hp <= max_hp ? int(hp) : 0;
     }
 }

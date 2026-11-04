@@ -20,200 +20,224 @@
 
 extern ImFont* espFont;
 
-static void esp_wait(const char* stage) {
-    static long long last = 0;
-    if (diag::every(last, 5000)) diag::log("WAIT", "ESP blocked at: %s", stage);
+// ---- Cached state: heavy reads at ~30Hz, draw at full framerate ----
+
+struct cached_enemy {
+    uint64_t object;
+    uint64_t native_transform;
+    int health;
+};
+
+static struct {
+    std::vector<cached_enemy> enemies;
+    uint64_t local_player{};
+    uint64_t local_native{};
+    int local_team{};
+    uint64_t cam_native{};
+    uint64_t cam_state{};
+    float cam_fov{60.f};
+    long long last_heavy{};
+    bool ready{};
+} g_fc;
+
+static std::unordered_map<uint64_t, std::string> g_names;
+static size_t g_name_idx = 0;
+
+static uint64_t first_native(uint64_t object) {
+    auto candidates = player::transform_candidates(object);
+    for (uint64_t managed : candidates) {
+        uint64_t native = rpm<uint64_t>(managed + v100::unity_cached_ptr);
+        if (native) return native;
+    }
+    return 0;
 }
 
-// ---- Position smoothing state ----
-struct smooth_entry {
-    Vector3 prev{};
-    Vector3 current{};
-    Vector3 display{};
-    long long last_update{};
-    bool initialized{false};
-};
-static std::unordered_map<uint64_t, smooth_entry> g_smooth;
+static bool refresh_camera(uint64_t local_player) {
+    if (player::g_stable_cam_controller) {
+        const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
+        const uint64_t state = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_state);
+        if (state && cs_class && exact_class(state, cs_class)) {
+            const uint64_t mt = rpm<uint64_t>(state + v100::cs_value_transform);
+            const uint64_t nt = mt ? rpm<uint64_t>(mt + v100::unity_cached_ptr) : 0;
+            if (nt) {
+                g_fc.cam_native = nt;
+                g_fc.cam_state = state;
+                float fov = rpm<float>(state + v100::cs_fov_float);
+                if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
+                    g_fc.cam_fov = fov;
+                return true;
+            }
+        }
+        player::g_stable_cam_controller = 0;
+    }
+    player::stable_camera cam = player::resolve_camera_state(local_player);
+    if (!cam.valid) return false;
+    g_fc.cam_fov = cam.fov;
+    if (player::g_stable_cam_controller) {
+        const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
+        const uint64_t state = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_state);
+        if (state && cs_class && exact_class(state, cs_class)) {
+            const uint64_t mt = rpm<uint64_t>(state + v100::cs_value_transform);
+            const uint64_t nt = mt ? rpm<uint64_t>(mt + v100::unity_cached_ptr) : 0;
+            if (nt) { g_fc.cam_native = nt; g_fc.cam_state = state; return true; }
+        }
+    }
+    g_fc.cam_native = 0;
+    return false;
+}
 
-static Vector3 smooth_position(uint64_t object, const Vector3& raw) {
-    const long long now = diag::now_ms();
-    smooth_entry& entry = g_smooth[object];
-    if (!entry.initialized) {
-        entry.prev = entry.current = entry.display = raw;
-        entry.last_update = now;
-        entry.initialized = true;
-        return raw;
+static void heavy_tick() {
+    std::vector<uint64_t> all = players();
+    if (all.empty()) { g_fc.ready = false; return; }
+
+    uint64_t local = 0;
+    for (uint64_t p : all) if (player::local(p)) { local = p; break; }
+    if (!local) { g_fc.ready = false; return; }
+
+    int team = player::team(local);
+    if (team != 1 && team != 2) { g_fc.ready = false; return; }
+
+    g_fc.local_player = local;
+    g_fc.local_team = team;
+    g_fc.local_native = first_native(local);
+
+    if (!refresh_camera(local)) { g_fc.ready = false; return; }
+
+    g_fc.enemies.clear();
+    for (uint64_t p : all) {
+        if (!p || p == local) continue;
+        int pt = player::team(p);
+        if (pt == team || (pt != 1 && pt != 2)) continue;
+        int hp = player::health(p);
+        if (hp <= 0) continue;
+        uint64_t nt = first_native(p);
+        if (!nt) continue;
+        g_fc.enemies.push_back({p, nt, hp});
     }
-    float dt = float(now - entry.last_update) * 0.001f;
-    if (dt > 1.f) dt = 1.f;
-    entry.last_update = now;
-    float dist = calculate_distance(raw, entry.current);
-    if (dist > 0.01f) {
-        entry.prev = entry.current;
-        entry.current = raw;
+
+    if (!g_fc.enemies.empty()) {
+        const auto& e = g_fc.enemies[g_name_idx++ % g_fc.enemies.size()];
+        if (g_names.find(e.object) == g_names.end())
+            g_names[e.object] = player_name(e.object);
     }
-    float lerp_speed = std::clamp(dt * 30.f, 0.f, 1.f);
-    entry.display.x += (raw.x - entry.display.x) * lerp_speed;
-    entry.display.y += (raw.y - entry.display.y) * lerp_speed;
-    entry.display.z += (raw.z - entry.display.z) * lerp_speed;
-    return entry.display;
+
+    for (auto it = g_names.begin(); it != g_names.end();) {
+        bool found = false;
+        for (const auto& e : g_fc.enemies)
+            if (e.object == it->first) { found = true; break; }
+        if (!found) it = g_names.erase(it);
+        else ++it;
+    }
+
+    g_fc.ready = true;
+
+    static long long diag_ms = 0;
+    if (diag::every(diag_ms, 5000))
+        diag::log("INFO", "heavy_tick players=%zu enemies=%zu local=0x%llx cam=0x%llx fov=%.1f",
+                  all.size(), g_fc.enemies.size(), (unsigned long long)local,
+                  (unsigned long long)g_fc.cam_native, g_fc.cam_fov);
 }
 
 
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
-    if (!any) { esp_wait("all ESP options disabled"); return; }
+    if (!any) return;
 
-    // Anti-crash: wrap entire draw in safe context
     safe::g_active = 1;
     if (sigsetjmp(safe::g_jmp, 1) != 0) {
         static long long crash_log = 0;
         if (diag::every(crash_log, 2000))
-            diag::log("SAFE", "ESP draw recovered from crash, skipping frame");
+            diag::log("SAFE", "ESP draw recovered from crash");
         return;
     }
 
-    std::vector<uint64_t> Players = players();
-    if (Players.empty()) { safe::g_active = 0; esp_wait("player discovery / registry scan"); return; }
-    struct name_cache_entry { uint32_t id{}; std::string name; long long refreshed{}; };
-    static std::unordered_map<uint64_t, name_cache_entry> name_cache;
-    static size_t name_cursor = 0;
-    {
-        const uint64_t object = Players[name_cursor++ % Players.size()];
-        const uint32_t id = rpm<uint32_t>(object + v100::net_object_id);
-        name_cache_entry& entry = name_cache[object];
-        const long long now = diag::now_ms();
-        if (entry.id != id || now - entry.refreshed > 5000) {
-            entry.id = id;
-            entry.name = player_name(object);
-            entry.refreshed = now;
-        }
-    }
-    static long long object_log = 0;
-    if (diag::every(object_log, 10000)) {
-        for (size_t i = 0; i < Players.size(); ++i) {
-            const uint64_t object = Players[i];
-            const Vector3 position = player::position(object);
-            std::string name_text = name_cache[object].name;
-            if (name_text.empty()) name_text = "<name unavailable>";
-            diag::log("PLAYER", "[%zu] object=0x%llx id=%u name=%s local=%d team=%d hp=%d pos=(%.3f %.3f %.3f)",
-                      i, (unsigned long long)object, rpm<uint32_t>(object + v100::net_object_id),
-                      name_text.c_str(), player::local(object) ? 1 : 0, player::team(object),
-                      player::health(object), position.x, position.y, position.z);
-        }
-    }
-    uint64_t LocalPlayer = 0;
-    for (uint64_t p : Players) if (player::local(p)) { LocalPlayer = p; break; }
-    if (!LocalPlayer) { safe::g_active = 0; esp_wait("local player flag"); return; }
-    Vector3 LocalPosition = player::position(LocalPlayer);
-    int LocalTeam = player::team(LocalPlayer);
-    if (LocalTeam != 1 && LocalTeam != 2) { safe::g_active = 0; esp_wait("local team validation"); return; }
-    if (!std::isfinite(LocalPosition.x) ||
-        (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
-        safe::g_active = 0; esp_wait("local transform hierarchy"); return;
-    }
-    int enemies = 0, alive = 0, positioned = 0, projected = 0;
-    struct enemy_frame {
-        uint64_t object{};
-        Vector3 position{};
-        int health{};
-        float distance{};
-    };
-    std::vector<enemy_frame> frame_enemies;
-    for (uint64_t Player : Players) {
-        if (!Player || Player == LocalPlayer) continue;
-        int PlayerTeam = player::team(Player);
-        if (PlayerTeam == LocalTeam || (PlayerTeam != 1 && PlayerTeam != 2)) continue;
-        ++enemies;
-
-        Vector3 PlayerPosition = player::position(Player);
-        if (PlayerPosition.x == 0.f && PlayerPosition.y == 0.f && PlayerPosition.z == 0.f) continue;
-        ++positioned;
-
-        int Health = player::health(Player);
-        if (Health <= 0) continue;
-        ++alive;
-
-        float Distance = calculate_distance(PlayerPosition, LocalPosition);
-        if (Distance > 500.f) continue;
-
-        PlayerPosition = smooth_position(Player, PlayerPosition);
-        frame_enemies.push_back({Player, PlayerPosition, Health, Distance});
+    const long long now = diag::now_ms();
+    if (now - g_fc.last_heavy >= 33) {
+        g_fc.last_heavy = now;
+        heavy_tick();
     }
 
-    // ---- Stable camera: CameraState first, ios fallback second ----
-    player::stable_camera cam = player::resolve_camera_state(LocalPlayer);
-    if (!cam.valid) { safe::g_active = 0; esp_wait("CameraState / fallback camera"); return; }
+    if (!g_fc.ready || g_fc.enemies.empty() || !g_fc.cam_native) {
+        safe::g_active = 0;
+        return;
+    }
 
-    matrix ViewMatrix = cam.view;
-    matrix ProjectionMatrix = cam.projection;
+    // ---- Per-frame: only fast reads from cached native pointers ----
 
-    for (const auto& Enemy : frame_enemies) {
-        const uint64_t Player = Enemy.object;
-        const Vector3 PlayerPosition = Enemy.position;
-        const int Health = Enemy.health;
-        const float Distance = Enemy.distance;
+    Vector3 cam_pos{};
+    Vector4 cam_rot{};
+    if (!player::decode_transform_pose(g_fc.cam_native, cam_pos, cam_rot)) {
+        safe::g_active = 0;
+        return;
+    }
 
-        Vector3 HeadPosition(PlayerPosition.x, PlayerPosition.y + 1.67f, PlayerPosition.z);
+    if (g_fc.cam_state) {
+        float fov = rpm<float>(g_fc.cam_state + v100::cs_fov_float);
+        if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
+            g_fc.cam_fov = fov;
+    }
 
-        ImVec2 ScreenHead, ScreenFoot;
-        bool HeadVisible = world_to_screen(HeadPosition, ViewMatrix, ProjectionMatrix, ScreenHead);
-        bool FootVisible = world_to_screen(PlayerPosition, ViewMatrix, ProjectionMatrix, ScreenFoot);
-        if (!HeadVisible || !FootVisible) continue;
+    matrix vp = mat_mul(
+        player::perspective(g_fc.cam_fov, g_sw / std::max(g_sh, 1.f)),
+        player::view_from_pose(cam_pos, cam_rot));
+
+    Vector3 local_pos{};
+    if (g_fc.local_native)
+        player::native_transform_position(g_fc.local_native, local_pos);
+
+    int projected = 0;
+
+    for (const auto& enemy : g_fc.enemies) {
+        Vector3 pos{};
+        if (!player::native_transform_position(enemy.native_transform, pos)) continue;
+        if (pos.x == 0.f && pos.y == 0.f && pos.z == 0.f) continue;
+
+        float dist = calculate_distance(pos, local_pos);
+        if (dist > 500.f) continue;
+
+        Vector3 head(pos.x, pos.y + 1.67f, pos.z);
+
+        ImVec2 sh, sf;
+        if (!world_to_screen_vp(head, vp, sh) ||
+            !world_to_screen_vp(pos, vp, sf)) continue;
         ++projected;
 
-        float x1 = roundf(ScreenHead.x);
-        float y1 = roundf(fminf(ScreenHead.y, ScreenFoot.y));
-        float x2 = roundf(ScreenFoot.x);
-        float y2 = roundf(fmaxf(ScreenHead.y, ScreenFoot.y));
+        float x1 = roundf(sh.x);
+        float y1 = roundf(fminf(sh.y, sf.y));
+        float x2 = roundf(sf.x);
+        float y2 = roundf(fmaxf(sh.y, sf.y));
 
         float bh = fabsf(y2 - y1);
         float bw = roundf(bh * 0.25f);
         float cx = roundf((x1 + x2) * 0.5f);
 
-        ImVec2 BoxMin(cx - bw, y1);
-        ImVec2 BoxMax(cx + bw, y2);
+        ImVec2 box_min(cx - bw, y1);
+        ImVec2 box_max(cx + bw, y2);
 
-        float inv_dist = 1.f / (Distance + 0.1f);
+        float inv_dist = 1.f / (dist + 0.1f);
         float font_sz = std::clamp(400.f * inv_dist, 10.f, 18.f);
 
-        if (cfg::esp::box) {
-            dbox(BoxMin, BoxMax, 1.f);
-        }
-
-        if (cfg::esp::health) {
-            dhp(Health, BoxMin, BoxMax, bh, 1.f);
-        }
+        if (cfg::esp::box) dbox(box_min, box_max, 1.f);
+        if (cfg::esp::health) dhp(enemy.health, box_min, box_max, bh, 1.f);
 
         if (cfg::esp::name) {
-            const auto found = name_cache.find(Player);
-            const char* label = found != name_cache.end() && !found->second.name.empty()
-                ? found->second.name.c_str() : "Enemy";
-            dnick(label, BoxMax, cx, font_sz, 1.f);
+            auto it = g_names.find(enemy.object);
+            const char* label = (it != g_names.end() && !it->second.empty())
+                ? it->second.c_str() : "Enemy";
+            dnick(label, box_max, cx, font_sz, 1.f);
         }
 
-        if (cfg::esp::distance) {
-            ddist(Distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
-        }
-    }
-
-    // Clean stale smooth entries
-    const long long now = diag::now_ms();
-    for (auto it = g_smooth.begin(); it != g_smooth.end();) {
-        if (now - it->second.last_update > 5000) it = g_smooth.erase(it);
-        else ++it;
+        if (cfg::esp::distance) ddist(dist, box_max.x, box_min.y, font_sz, 1.f);
     }
 
     safe::g_active = 0;
 
     static long long frame_log = 0;
-    if (diag::every(frame_log, 5000)) {
+    if (diag::every(frame_log, 5000))
         diag::log(projected ? "INFO" : "WARN",
-                  "ESP frame players=%zu local=0x%llx team=%d pos=(%.2f %.2f %.2f) enemies=%d positioned=%d alive=%d projected=%d fov=%.1f",
-                  Players.size(), (unsigned long long)LocalPlayer, LocalTeam,
-                  LocalPosition.x, LocalPosition.y, LocalPosition.z, enemies, positioned, alive,
-                  projected, cam.fov);
-    }
+                  "ESP frame enemies=%zu projected=%d fov=%.1f cam=(%.2f %.2f %.2f)",
+                  g_fc.enemies.size(), projected, g_fc.cam_fov,
+                  cam_pos.x, cam_pos.y, cam_pos.z);
 }
 
 void visuals::dbox(const ImVec2& t, const ImVec2& b, float a) {

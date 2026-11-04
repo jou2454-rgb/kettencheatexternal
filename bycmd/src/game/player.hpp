@@ -415,123 +415,19 @@ namespace player {
         if (!exact_class(stats, stats_class)) return 0;
         uint16_t hp = rpm<uint16_t>(stats + v100::stats_hp);
         uint16_t max_hp = rpm<uint16_t>(stats + v100::stats_max_hp);
-        return max_hp > 0 && max_hp <= 10000 && hp <= max_hp ? int(hp) : 0;
+        if (max_hp == 0 || max_hp > 10000 || hp > max_hp) return 0;
+        if (hp == 0) return 0;
+        return int(hp);
     }
 
-    // ---- Stable camera via CameraState (bor) ----
-    // CameraController (kmc) → CameraControllerBase_State (+0x10) → CameraState (bor)
-    // CameraState has ValueTransform (+0x10) which is the camera's actual Transform.
-    // This is FAR more stable than scoring native Camera heap objects.
-    struct stable_camera {
-        matrix view{};
-        matrix projection{};
-        float fov{60.f};
-        bool valid{false};
-    };
-
-    inline stable_camera g_stable_cam;
-    inline uint64_t g_stable_cam_controller = 0;
-    inline long long g_stable_cam_scan_ms = 0;
-
-    inline uint64_t find_camera_controller(uint64_t local_player) {
-        const uint64_t cc_class = rpm<uint64_t>(proc::lib + v100::camera_controller_typeinfo);
-        if (!cc_class) return 0;
-        uint64_t controller = find_player_component(local_player, cc_class);
-        if (controller) return controller;
-        const uint64_t container = rpm<uint64_t>(local_player + 0x20);
-        if (!plausible(container)) return 0;
-        for (uint64_t field = 0x10; field <= 0x38; field += 8) {
-            const uint64_t array = rpm<uint64_t>(container + field);
-            const uint64_t count = rpm<uint64_t>(array + v100::array_length);
-            if (!plausible(array) || count > 256) continue;
-            for (uint64_t i = 0; i < count; ++i) {
-                const uint64_t comp = rpm<uint64_t>(array + v100::array_data + i * 8);
-                if (!obj_ptr(comp)) continue;
-                for (int off = 0x10; off <= 0x80; off += 8) {
-                    const uint64_t sub = rpm<uint64_t>(comp + uint64_t(off));
-                    if (exact_class(sub, cc_class)) return sub;
-                }
-            }
-        }
-        return 0;
-    }
-
-    inline stable_camera resolve_camera_state(uint64_t local_player) {
-        stable_camera cam;
-        const long long now = diag::now_ms();
-
-        if (g_stable_cam_controller) {
-            const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
-            const uint64_t state = rpm<uint64_t>(g_stable_cam_controller + v100::cc_state);
-            if (state && cs_class && exact_class(state, cs_class)) {
-                const uint64_t managed_transform = rpm<uint64_t>(state + v100::cs_value_transform);
-                const uint64_t native_transform = managed_transform ? rpm<uint64_t>(managed_transform + v100::unity_cached_ptr) : 0;
-                if (native_transform) {
-                    Vector3 cam_pos{};
-                    Vector4 cam_rot{};
-                    if (decode_transform_pose(native_transform, cam_pos, cam_rot)) {
-                        float fov_raw = rpm<float>(state + v100::cs_fov_float);
-                        if (!std::isfinite(fov_raw) || fov_raw < 5.f || fov_raw > 170.f)
-                            fov_raw = 60.f;
-                        cam.view = view_from_pose(cam_pos, cam_rot);
-                        cam.projection = perspective(fov_raw, g_sw / std::max(g_sh, 1.f));
-                        cam.fov = fov_raw;
-                        cam.valid = true;
-                        static long long cs_log = 0;
-                        if (diag::every(cs_log, 5000))
-                            diag::log("CAMERA", "CameraState OK pos=(%.2f %.2f %.2f) fov=%.1f controller=0x%llx",
-                                      cam_pos.x, cam_pos.y, cam_pos.z, fov_raw,
-                                      (unsigned long long)g_stable_cam_controller);
-                        g_stable_cam = cam;
-                        return cam;
-                    }
-                }
-            }
-            g_stable_cam_controller = 0;
-        }
-
-        if (now - g_stable_cam_scan_ms < 500) {
-            if (g_stable_cam.valid) return g_stable_cam;
-            return cam;
-        }
-        g_stable_cam_scan_ms = now;
-
-        uint64_t controller = find_camera_controller(local_player);
-        if (!controller) {
-            const uint64_t ios_class = rpm<uint64_t>(proc::lib + v100::ios_typeinfo);
-            const uint64_t ios = find_player_component(local_player, ios_class);
-            if (ios) {
-                const uint64_t cc_class = rpm<uint64_t>(proc::lib + v100::camera_controller_typeinfo);
-                if (cc_class) {
-                    for (int off = 0x10; off <= 0xA0; off += 8) {
-                        const uint64_t sub = rpm<uint64_t>(ios + uint64_t(off));
-                        if (exact_class(sub, cc_class)) { controller = sub; break; }
-                    }
-                }
-            }
-        }
-
-        if (controller) {
-            g_stable_cam_controller = controller;
-            diag::log("CAMERA", "CameraController found at 0x%llx", (unsigned long long)controller);
-            return resolve_camera_state(local_player);
-        }
-
-        // Fallback: use ios controller transform-based camera (old method)
-        // but only produce ONE candidate to avoid flipping.
-        std::vector<camera_candidate> fallbacks = camera_fallback_candidates(local_player);
-        if (!fallbacks.empty()) {
-            cam.view = fallbacks[0].view;
-            cam.projection = fallbacks[0].projection;
-            cam.fov = 60.f;
-            cam.valid = true;
-            g_stable_cam = cam;
-        }
-
-        static long long scan_log = 0;
-        if (diag::every(scan_log, 3000))
-            diag::log("CAMERA", "CameraController scan cc=0x%llx fallback=%s",
-                      (unsigned long long)controller, cam.valid ? "yes" : "no");
-        return cam;
+    inline bool alive(uint64_t p) noexcept {
+        if (!p) return false;
+        int hp = health(p);
+        if (hp <= 0) return false;
+        uint64_t parts = rpm<uint64_t>(p + v100::player_parts);
+        if (!plausible(parts)) return false;
+        uint64_t world = rpm<uint64_t>(p + v100::player_world);
+        if (!plausible(world)) return false;
+        return true;
     }
 }

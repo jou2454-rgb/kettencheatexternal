@@ -39,15 +39,6 @@ namespace v100 {
     inline constexpr uint64_t weapon_part_typeinfo = 0xCD33B78; // ruz (was qjf)
     inline constexpr uint64_t camera_typeinfo = 0xCD1F798; // UnityEngine.Camera_TypeInfo, script.json (was 0xC1F4198, outside TypeInfo table)
     inline constexpr uint64_t ios_typeinfo = 0xCD36248; // yjp (was ios), has kgd@rot + ydm + 2x Transform
-    inline constexpr uint64_t camera_state_typeinfo = 0xCD2DEF0; // bor (CameraState)
-    inline constexpr uint64_t camera_controller_typeinfo = 0xCD311F8; // kmc (CameraController)
-    inline constexpr uint64_t cs_value_transform = 0x10;
-    inline constexpr uint64_t cs_target_ctor_id = 0x28;
-    inline constexpr uint64_t cs_target_current_id = 0x30;
-    inline constexpr uint64_t cs_fov_float = 0x48;
-    inline constexpr uint64_t cc_state = 0x10;
-    inline constexpr uint64_t cc_transform = 0x18;
-    inline constexpr uint64_t cc_camera = 0x20;
     inline constexpr uint64_t player_string_literal = 0xCDADA30; // FILL: any initialised string literal slot (stringliteral.json); "" slot, may be null until used
     inline constexpr uint64_t data_relro_begin = 0xB886F80;
     inline constexpr uint64_t data_end = 0xC46CF80;

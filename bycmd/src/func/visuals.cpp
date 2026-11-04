@@ -20,12 +20,11 @@
 
 extern ImFont* espFont;
 
-// ---- Cached state: heavy reads at ~30Hz, draw at full framerate ----
+// ---- Frame cache: heavy reads ~30Hz, draw at full framerate ----
 
 struct cached_enemy {
     uint64_t object;
     uint64_t native_transform;
-    int health;
 };
 
 static struct {
@@ -33,9 +32,16 @@ static struct {
     uint64_t local_player{};
     uint64_t local_native{};
     int local_team{};
-    uint64_t cam_native{};
+
+    uint64_t cam_transform{};
     uint64_t cam_state{};
     float cam_fov{60.f};
+
+    uint64_t cam_object{};
+    int cam_view_off{-1};
+    int cam_proj_off{-1};
+    int cam_confirm{0};
+
     long long last_heavy{};
     bool ready{};
 } g_fc;
@@ -53,37 +59,57 @@ static uint64_t first_native(uint64_t object) {
 }
 
 static bool refresh_camera(uint64_t local_player) {
-    if (player::g_stable_cam_controller) {
-        const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
-        const uint64_t state = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_state);
-        if (state && cs_class && exact_class(state, cs_class)) {
-            const uint64_t mt = rpm<uint64_t>(state + v100::cs_value_transform);
-            const uint64_t nt = mt ? rpm<uint64_t>(mt + v100::unity_cached_ptr) : 0;
-            if (nt) {
-                g_fc.cam_native = nt;
-                g_fc.cam_state = state;
-                float fov = rpm<float>(state + v100::cs_fov_float);
-                if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
-                    g_fc.cam_fov = fov;
-                return true;
+    if (!player::g_stable_cam_controller) {
+        player::resolve_camera_state(local_player);
+    }
+    if (!player::g_stable_cam_controller) return false;
+
+    const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
+    const uint64_t state = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_state);
+    if (!state || !cs_class || !exact_class(state, cs_class)) {
+        player::g_stable_cam_controller = 0;
+        return false;
+    }
+
+    g_fc.cam_state = state;
+    float fov = rpm<float>(state + v100::cs_fov_float);
+    if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
+        g_fc.cam_fov = fov;
+
+    const uint64_t mt = rpm<uint64_t>(state + v100::cs_value_transform);
+    g_fc.cam_transform = mt ? rpm<uint64_t>(mt + v100::unity_cached_ptr) : 0;
+
+    uint64_t managed_cam = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_camera);
+    uint64_t native_cam = managed_cam ? rpm<uint64_t>(managed_cam + v100::unity_cached_ptr) : 0;
+    if (native_cam && obj_ptr(native_cam)) {
+        if (g_fc.cam_object != native_cam) {
+            g_fc.cam_object = native_cam;
+            g_fc.cam_view_off = -1;
+            g_fc.cam_proj_off = -1;
+            g_fc.cam_confirm = 0;
+        }
+        matrix v{}, p{};
+        int vo = -1, po = -1;
+        if (detect_pair(native_cam, v, p, vo, po, "esp")) {
+            if (g_fc.cam_view_off == vo && g_fc.cam_proj_off == po) {
+                if (g_fc.cam_confirm < 3) ++g_fc.cam_confirm;
+            } else {
+                g_fc.cam_view_off = vo;
+                g_fc.cam_proj_off = po;
+                g_fc.cam_confirm = 1;
             }
         }
-        player::g_stable_cam_controller = 0;
+    } else {
+        g_fc.cam_object = 0;
     }
-    player::stable_camera cam = player::resolve_camera_state(local_player);
-    if (!cam.valid) return false;
-    g_fc.cam_fov = cam.fov;
-    if (player::g_stable_cam_controller) {
-        const uint64_t cs_class = rpm<uint64_t>(proc::lib + v100::camera_state_typeinfo);
-        const uint64_t state = rpm<uint64_t>(player::g_stable_cam_controller + v100::cc_state);
-        if (state && cs_class && exact_class(state, cs_class)) {
-            const uint64_t mt = rpm<uint64_t>(state + v100::cs_value_transform);
-            const uint64_t nt = mt ? rpm<uint64_t>(mt + v100::unity_cached_ptr) : 0;
-            if (nt) { g_fc.cam_native = nt; g_fc.cam_state = state; return true; }
-        }
-    }
-    g_fc.cam_native = 0;
-    return false;
+
+    static long long cam_log = 0;
+    if (diag::every(cam_log, 5000))
+        diag::log("CAMERA", "native=0x%llx off=+0x%x/+0x%x confirm=%d fallback=0x%llx fov=%.1f",
+                  (unsigned long long)g_fc.cam_object, g_fc.cam_view_off, g_fc.cam_proj_off,
+                  g_fc.cam_confirm, (unsigned long long)g_fc.cam_transform, g_fc.cam_fov);
+
+    return g_fc.cam_object || g_fc.cam_transform;
 }
 
 static void heavy_tick() {
@@ -108,11 +134,9 @@ static void heavy_tick() {
         if (!p || p == local) continue;
         int pt = player::team(p);
         if (pt == team || (pt != 1 && pt != 2)) continue;
-        int hp = player::health(p);
-        if (hp <= 0) continue;
         uint64_t nt = first_native(p);
         if (!nt) continue;
-        g_fc.enemies.push_back({p, nt, hp});
+        g_fc.enemies.push_back({p, nt});
     }
 
     if (!g_fc.enemies.empty()) {
@@ -133,9 +157,8 @@ static void heavy_tick() {
 
     static long long diag_ms = 0;
     if (diag::every(diag_ms, 5000))
-        diag::log("INFO", "heavy_tick players=%zu enemies=%zu local=0x%llx cam=0x%llx fov=%.1f",
-                  all.size(), g_fc.enemies.size(), (unsigned long long)local,
-                  (unsigned long long)g_fc.cam_native, g_fc.cam_fov);
+        diag::log("INFO", "heavy_tick players=%zu enemies=%zu local=0x%llx",
+                  all.size(), g_fc.enemies.size(), (unsigned long long)local);
 }
 
 
@@ -157,29 +180,48 @@ void visuals::draw() {
         heavy_tick();
     }
 
-    if (!g_fc.ready || g_fc.enemies.empty() || !g_fc.cam_native) {
+    if (!g_fc.ready || g_fc.enemies.empty()) {
         safe::g_active = 0;
         return;
     }
 
-    // ---- Per-frame: only fast reads from cached native pointers ----
+    // ---- Camera: native Camera matrices first, Transform fallback ----
 
-    Vector3 cam_pos{};
-    Vector4 cam_rot{};
-    if (!player::decode_transform_pose(g_fc.cam_native, cam_pos, cam_rot)) {
-        safe::g_active = 0;
-        return;
+    matrix vp{};
+    bool have_vp = false;
+
+    if (g_fc.cam_object && g_fc.cam_view_off >= 0) {
+        matrix view{}, proj{};
+        if (mem_read(g_fc.cam_object + uint64_t(g_fc.cam_view_off), &view, sizeof(view)) &&
+            mem_read(g_fc.cam_object + uint64_t(g_fc.cam_proj_off), &proj, sizeof(proj))) {
+            const float* v = reinterpret_cast<const float*>(&view);
+            const float* p = reinterpret_cast<const float*>(&proj);
+            if (matrix_window_sane(v, true) && matrix_window_sane(p, false)) {
+                vp = mat_mul(proj, view);
+                have_vp = true;
+            }
+        }
     }
 
-    if (g_fc.cam_state) {
-        float fov = rpm<float>(g_fc.cam_state + v100::cs_fov_float);
-        if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
-            g_fc.cam_fov = fov;
+    if (!have_vp && g_fc.cam_transform) {
+        Vector3 cam_pos{};
+        Vector4 cam_rot{};
+        if (player::decode_transform_pose(g_fc.cam_transform, cam_pos, cam_rot)) {
+            if (g_fc.cam_state) {
+                float fov = rpm<float>(g_fc.cam_state + v100::cs_fov_float);
+                if (std::isfinite(fov) && fov >= 5.f && fov <= 170.f)
+                    g_fc.cam_fov = fov;
+            }
+            vp = mat_mul(
+                player::perspective(g_fc.cam_fov, g_sw / std::max(g_sh, 1.f)),
+                player::view_from_pose(cam_pos, cam_rot));
+            have_vp = true;
+        }
     }
 
-    matrix vp = mat_mul(
-        player::perspective(g_fc.cam_fov, g_sw / std::max(g_sh, 1.f)),
-        player::view_from_pose(cam_pos, cam_rot));
+    if (!have_vp) { safe::g_active = 0; return; }
+
+    // ---- Per-frame reads ----
 
     Vector3 local_pos{};
     if (g_fc.local_native)
@@ -188,6 +230,9 @@ void visuals::draw() {
     int projected = 0;
 
     for (const auto& enemy : g_fc.enemies) {
+        int hp = player::health(enemy.object);
+        if (hp <= 0) continue;
+
         Vector3 pos{};
         if (!player::native_transform_position(enemy.native_transform, pos)) continue;
         if (pos.x == 0.f && pos.y == 0.f && pos.z == 0.f) continue;
@@ -218,7 +263,7 @@ void visuals::draw() {
         float font_sz = std::clamp(400.f * inv_dist, 10.f, 18.f);
 
         if (cfg::esp::box) dbox(box_min, box_max, 1.f);
-        if (cfg::esp::health) dhp(enemy.health, box_min, box_max, bh, 1.f);
+        if (cfg::esp::health) dhp(hp, box_min, box_max, bh, 1.f);
 
         if (cfg::esp::name) {
             auto it = g_names.find(enemy.object);
@@ -235,9 +280,9 @@ void visuals::draw() {
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000))
         diag::log(projected ? "INFO" : "WARN",
-                  "ESP frame enemies=%zu projected=%d fov=%.1f cam=(%.2f %.2f %.2f)",
-                  g_fc.enemies.size(), projected, g_fc.cam_fov,
-                  cam_pos.x, cam_pos.y, cam_pos.z);
+                  "ESP frame enemies=%zu projected=%d native_cam=%s fov=%.1f",
+                  g_fc.enemies.size(), projected,
+                  have_vp && g_fc.cam_object ? "yes" : "fallback", g_fc.cam_fov);
 }
 
 void visuals::dbox(const ImVec2& t, const ImVec2& b, float a) {

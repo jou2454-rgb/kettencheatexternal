@@ -19,174 +19,139 @@
 
 extern ImFont* espFont;
 
-static void esp_wait(const char* stage) {
-    static long long last = 0;
-    if (diag::every(last, 5000)) diag::log("WAIT", "ESP blocked at: %s", stage);
+// ---- Name cache (1 resolve per frame to avoid stalls) ----
+struct name_cache_entry { uint32_t id{}; std::string name; long long refreshed{}; };
+static std::unordered_map<uint64_t, name_cache_entry> g_name_cache;
+static size_t g_name_cursor = 0;
+
+static void update_name_cache(const std::vector<uint64_t>& players) {
+    if (players.empty()) return;
+    const uint64_t object = players[g_name_cursor++ % players.size()];
+    const uint32_t id = rpm<uint32_t>(object + v100::net_object_id);
+    name_cache_entry& entry = g_name_cache[object];
+    const long long now = diag::now_ms();
+    if (entry.id != id || now - entry.refreshed > 5000) {
+        entry.id = id;
+        entry.name = player_name(object);
+        entry.refreshed = now;
+    }
+}
+
+// ---- Camera resolution: 3 tiers ----
+// Tier 1: main_camera_matrices() — il2cpp-resolved native Camera, real V/P
+// Tier 2: camera_candidates() with detect_pair (view_off >= 0) — native with real V/P
+// Tier 3: camera_fallback_candidates() — Transform-built V/P (has displacement)
+static bool resolve_camera(uint64_t local_player, const Vector3& local_pos,
+                           matrix& out_view, matrix& out_proj) {
+    // Tier 1: direct il2cpp chain -> native Camera -> detect_pair
+    {
+        uint64_t native = 0;
+        if (main_camera_matrices(local_player, native, out_view, out_proj)) {
+            static long long t1_log = 0;
+            if (diag::every(t1_log, 5000))
+                diag::log("CAMERA", "tier1 native=0x%llx", (unsigned long long)native);
+            g_camera = native;
+            return true;
+        }
+    }
+
+    // Tier 2: camera_candidates (probed native objects with detect_pair)
+    {
+        std::vector<camera_candidate> cams = camera_candidates(local_player);
+        // Pick the one closest to local player with valid detect_pair offsets
+        float best_dist = 1e9f;
+        bool found = false;
+        for (const auto& c : cams) {
+            if (c.view_off < 0) continue; // skip non-detect_pair
+            const float* v = reinterpret_cast<const float*>(&c.view);
+            const Vector3 cam_pos(
+                -(v[0]*v[12] + v[1]*v[13] + v[2]*v[14]),
+                -(v[4]*v[12] + v[5]*v[13] + v[6]*v[14]),
+                -(v[8]*v[12] + v[9]*v[13] + v[10]*v[14]));
+            float d = calculate_distance(cam_pos, local_pos);
+            if (d < best_dist) {
+                best_dist = d;
+                out_view = c.view;
+                out_proj = c.projection;
+                g_camera = c.address;
+                found = true;
+            }
+        }
+        if (found && best_dist < 30.f) {
+            static long long t2_log = 0;
+            if (diag::every(t2_log, 5000))
+                diag::log("CAMERA", "tier2 cam=0x%llx dist=%.1f", (unsigned long long)g_camera, best_dist);
+            return true;
+        }
+    }
+
+    // Tier 3: transform fallback (last resort, may have displacement)
+    {
+        std::vector<camera_candidate> fb = player::camera_fallback_candidates(local_player);
+        if (!fb.empty()) {
+            out_view = fb[0].view;
+            out_proj = fb[0].projection;
+            g_camera = fb[0].address;
+            static long long t3_log = 0;
+            if (diag::every(t3_log, 5000))
+                diag::log("CAMERA", "tier3 fallback cam=0x%llx", (unsigned long long)g_camera);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
-    if (!any) { esp_wait("all ESP options disabled"); return; }
+    if (!any) return;
 
+    // ---- Player discovery ----
     std::vector<uint64_t> Players = players();
-    if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
-    struct name_cache_entry { uint32_t id{}; std::string name; long long refreshed{}; };
-    static std::unordered_map<uint64_t, name_cache_entry> name_cache;
-    static size_t name_cursor = 0;
-    // Resolve at most one name per frame. Name discovery touches several
-    // component objects, so batching all ten players caused visible UI stalls.
-    {
-        const uint64_t object = Players[name_cursor++ % Players.size()];
-        const uint32_t id = rpm<uint32_t>(object + v100::net_object_id);
-        name_cache_entry& entry = name_cache[object];
-        const long long now = diag::now_ms();
-        if (entry.id != id || now - entry.refreshed > 5000) {
-            entry.id = id;
-            entry.name = player_name(object);
-            entry.refreshed = now;
-        }
-    }
-    static long long object_log = 0;
-    if (diag::every(object_log, 10000)) {
-        for (size_t i = 0; i < Players.size(); ++i) {
-            const uint64_t object = Players[i];
-            const Vector3 position = player::position(object);
-            std::string name_text = name_cache[object].name;
-            if (name_text.empty()) name_text = "<name unavailable>";
-            diag::log("PLAYER", "[%zu] object=0x%llx id=%u name=%s local=%d team=%d hp=%d pos=(%.3f %.3f %.3f)",
-                      i, (unsigned long long)object, rpm<uint32_t>(object + v100::net_object_id),
-                      name_text.c_str(), player::local(object) ? 1 : 0, player::team(object),
-                      player::health(object), position.x, position.y, position.z);
-        }
-    }
+    if (Players.empty()) return;
+
+    update_name_cache(Players);
+
     uint64_t LocalPlayer = 0;
     for (uint64_t p : Players) if (player::local(p)) { LocalPlayer = p; break; }
-    if (!LocalPlayer) { esp_wait("local player flag"); return; }
+    if (!LocalPlayer) return;
+
     Vector3 LocalPosition = player::position(LocalPlayer);
     int LocalTeam = player::team(LocalPlayer);
-    if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
+    if (LocalTeam != 1 && LocalTeam != 2) return;
     if (!std::isfinite(LocalPosition.x) ||
-        (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
-        esp_wait("local transform hierarchy"); return;
-    }
-    int enemies = 0, alive = 0, positioned = 0, projected = 0;
-    struct enemy_frame {
-        uint64_t object{};
-        Vector3 position{};
-        int health{};
-        float distance{};
-    };
-    std::vector<enemy_frame> frame_enemies;
+        (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f))
+        return;
+
+    // ---- Camera: real Unity matrices ----
+    matrix ViewMatrix{}, ProjectionMatrix{};
+    if (!resolve_camera(LocalPlayer, LocalPosition, ViewMatrix, ProjectionMatrix))
+        return;
+
+    // ---- Draw enemies ----
+    int projected = 0;
+
     for (uint64_t Player : Players) {
         if (!Player || Player == LocalPlayer) continue;
         int PlayerTeam = player::team(Player);
         if (PlayerTeam == LocalTeam || (PlayerTeam != 1 && PlayerTeam != 2)) continue;
-        ++enemies;
+
+        // HP check every frame — dead players filtered instantly
+        int Health = player::health(Player);
+        if (Health <= 0) continue;
 
         Vector3 PlayerPosition = player::position(Player);
         if (PlayerPosition.x == 0.f && PlayerPosition.y == 0.f && PlayerPosition.z == 0.f) continue;
-        ++positioned;
-
-        int Health = player::health(Player);
-        if (Health <= 0) continue;
-        ++alive;
 
         float Distance = calculate_distance(PlayerPosition, LocalPosition);
         if (Distance > 500.f) continue;
 
-        frame_enemies.push_back({Player, PlayerPosition, Health, Distance});
-    }
-
-    // Do not trust the first camera-shaped native object. Unity keeps scene,
-    // UI, preview and stale Camera instances alive together. Score every
-    // validated candidate against the live player coordinates and select the
-    // one whose view/projection pair actually places bodies on this display.
-    std::vector<camera_candidate> Cameras = camera_candidates(LocalPlayer);
-    // In 1.0.0 the gameplay Camera is no longer reachable through the
-    // Transform/GameObject component list. The local ios controller still
-    // owns the live camera transforms, so build a view matrix from their
-    // hierarchy instead of falling back to a multi-gigabyte heap scan.
-    std::vector<camera_candidate> TransformCameras =
-        player::camera_fallback_candidates(LocalPlayer);
-    Cameras.insert(Cameras.end(), TransformCameras.begin(), TransformCameras.end());
-    if (Cameras.empty()) { esp_wait("native / transform camera resolution"); return; }
-
-    matrix ViewMatrix{}, ProjectionMatrix{};
-    uint64_t selected_camera = 0;
-    int selected_score = -1, selected_front = 0, selected_onscreen = 0;
-    float selected_camera_distance = 1000000.f;
-    static long long candidate_log = 0;
-    const bool log_candidates = diag::every(candidate_log, 5000);
-    for (const auto& Camera : Cameras) {
-        int score = 0, front = 0, onscreen = 0;
-        if (Camera.view_off >= 0) score += 200;
-        const float* view = reinterpret_cast<const float*>(&Camera.view);
-        const Vector3 camera_position(
-            -(view[0] * view[12] + view[1] * view[13] + view[2] * view[14]),
-            -(view[4] * view[12] + view[5] * view[13] + view[6] * view[14]),
-            -(view[8] * view[12] + view[9] * view[13] + view[10] * view[14]));
-        const float camera_distance = calculate_distance(camera_position, LocalPosition);
-        if (camera_distance < 2.f) score += 100;
-        else if (camera_distance < 10.f) score += 80;
-        else if (camera_distance < 30.f) score += 30;
-        const float* projection = reinterpret_cast<const float*>(&Camera.projection);
-        if (std::fabs(projection[11]) > .5f && std::fabs(projection[15]) < .1f) score += 30;
-        for (const auto& Enemy : frame_enemies) {
-            Vector3 Head(Enemy.position.x, Enemy.position.y + 1.67f, Enemy.position.z);
-            ImVec2 screen_head, screen_foot;
-            if (!world_to_screen(Head, Camera.view, Camera.projection, screen_head) ||
-                !world_to_screen(Enemy.position, Camera.view, Camera.projection, screen_foot)) continue;
-            if (!std::isfinite(screen_head.x) || !std::isfinite(screen_head.y) ||
-                !std::isfinite(screen_foot.x) || !std::isfinite(screen_foot.y)) continue;
-            ++front;
-            ++score;
-            const bool head_inside = screen_head.x >= -g_sw * .25f && screen_head.x <= g_sw * 1.25f &&
-                                     screen_head.y >= -g_sh * .25f && screen_head.y <= g_sh * 1.25f;
-            const bool foot_inside = screen_foot.x >= -g_sw * .25f && screen_foot.x <= g_sw * 1.25f &&
-                                     screen_foot.y >= -g_sh * .25f && screen_foot.y <= g_sh * 1.25f;
-            const float body_height = std::fabs(screen_foot.y - screen_head.y);
-            if (head_inside && foot_inside) { ++onscreen; score += 6; }
-            if (body_height >= 2.f && body_height <= g_sh * 1.5f) score += 3;
-        }
-        // Keep the current winner on equal scores to avoid camera flicker.
-        if (score > selected_score || (score == selected_score && Camera.address == g_camera)) {
-            selected_score = score;
-            selected_front = front;
-            selected_onscreen = onscreen;
-            selected_camera_distance = camera_distance;
-            selected_camera = Camera.address;
-            ViewMatrix = Camera.view;
-            ProjectionMatrix = Camera.projection;
-        }
-        if (log_candidates)
-            diag::log("CAMERA", "candidate=0x%llx score=%d front=%d onscreen=%d localDistance=%.2f proj=(%.3f %.3f)",
-                      (unsigned long long)Camera.address, score, front, onscreen, camera_distance,
-                      Camera.projection.m11, Camera.projection.m22);
-    }
-    if (!selected_camera || (selected_camera_distance >= 30.f && selected_onscreen == 0)) {
-        g_camera = 0;
-        esp_wait("camera candidates do not project players");
-        return;
-    }
-    if (g_camera != selected_camera) {
-        diag::log("CAMERA", "selected=0x%llx score=%d front=%d onscreen=%d localDistance=%.2f candidates=%zu",
-                  (unsigned long long)selected_camera, selected_score, selected_front,
-                  selected_onscreen, selected_camera_distance, Cameras.size());
-    }
-    g_camera = selected_camera;
-
-    for (const auto& Enemy : frame_enemies) {
-        const uint64_t Player = Enemy.object;
-        const Vector3 PlayerPosition = Enemy.position;
-        const int Health = Enemy.health;
-        const float Distance = Enemy.distance;
-
         Vector3 HeadPosition(PlayerPosition.x, PlayerPosition.y + 1.67f, PlayerPosition.z);
 
         ImVec2 ScreenHead, ScreenFoot;
-        bool HeadVisible = world_to_screen(HeadPosition, ViewMatrix, ProjectionMatrix, ScreenHead);
-        bool FootVisible = world_to_screen(PlayerPosition, ViewMatrix, ProjectionMatrix, ScreenFoot);
-        if (!HeadVisible || !FootVisible) continue;
+        if (!world_to_screen(HeadPosition, ViewMatrix, ProjectionMatrix, ScreenHead) ||
+            !world_to_screen(PlayerPosition, ViewMatrix, ProjectionMatrix, ScreenFoot))
+            continue;
         ++projected;
 
         float x1 = roundf(ScreenHead.x);
@@ -204,33 +169,24 @@ void visuals::draw() {
         float inv_dist = 1.f / (Distance + 0.1f);
         float font_sz = std::clamp(400.f * inv_dist, 10.f, 18.f);
 
-        if (cfg::esp::box) {
-            dbox(BoxMin, BoxMax, 1.f);
-        }
-
-        if (cfg::esp::health) {
-            dhp(Health, BoxMin, BoxMax, bh, 1.f);
-        }
+        if (cfg::esp::box) dbox(BoxMin, BoxMax, 1.f);
+        if (cfg::esp::health) dhp(Health, BoxMin, BoxMax, bh, 1.f);
 
         if (cfg::esp::name) {
-            const auto found = name_cache.find(Player);
-            const char* label = found != name_cache.end() && !found->second.name.empty()
+            const auto found = g_name_cache.find(Player);
+            const char* label = found != g_name_cache.end() && !found->second.name.empty()
                 ? found->second.name.c_str() : "Enemy";
             dnick(label, BoxMax, cx, font_sz, 1.f);
         }
 
-        if (cfg::esp::distance) {
-            ddist(Distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
-        }
+        if (cfg::esp::distance) ddist(Distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
     }
+
     static long long frame_log = 0;
-    if (diag::every(frame_log, 5000)) {
+    if (diag::every(frame_log, 5000))
         diag::log(projected ? "INFO" : "WARN",
-                  "ESP frame players=%zu local=0x%llx team=%d pos=(%.2f %.2f %.2f) enemies=%d positioned=%d alive=%d projected=%d camera=0x%llx",
-                  Players.size(), (unsigned long long)LocalPlayer, LocalTeam,
-                  LocalPosition.x, LocalPosition.y, LocalPosition.z, enemies, positioned, alive,
-                  projected, (unsigned long long)g_camera);
-    }
+                  "ESP frame players=%zu projected=%d camera=0x%llx",
+                  Players.size(), projected, (unsigned long long)g_camera);
 }
 
 void visuals::dbox(const ImVec2& t, const ImVec2& b, float a) {

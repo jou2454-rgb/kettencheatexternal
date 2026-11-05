@@ -74,6 +74,7 @@ inline size_t g_registry_map = 0, g_camera_map = 0;
 inline uint64_t g_registry_cursor = 0, g_camera_cursor = 0;
 inline uint64_t g_camera_next_address = 0;
 inline uint64_t g_registry = 0, g_camera = 0;
+inline float g_detected_fov = 0.f;
 inline int g_scan_pid = -1;
 inline uint64_t g_scan_lib = 0;
 inline uint64_t g_registry_scanned = 0, g_camera_scanned = 0;
@@ -90,7 +91,7 @@ inline std::vector<vtable_check> g_vtable_checks;
 inline bool g_get_main_dumped = false;
 
 inline void reset() {
-    g_registry = g_camera = 0; g_scan_maps.clear();
+    g_registry = g_camera = 0; g_detected_fov = 0.f; g_scan_maps.clear();
     g_registry_map = g_camera_map = 0; g_registry_cursor = g_camera_cursor = 0;
     g_camera_next_address = 0;
     g_registry_scanned = g_camera_scanned = 0;
@@ -629,14 +630,16 @@ inline bool matrix_window_sane(const float* m, bool want_view) {
 // by float patterns. No hardcoded offsets.
 inline bool detect_pair(uint64_t obj, matrix& view, matrix& projection,
                         int& view_off, int& proj_off, const char* tag) {
-    uint8_t buf[0x180]{};
-    if (!mem_read(obj, buf, sizeof(buf))) return false;
+    uint8_t buf[0x500]{};
+    const int buf_sz = sizeof(buf);
+    if (!mem_read(obj, buf, buf_sz)) return false;
     auto at = [&](int off) -> const float* {
         return reinterpret_cast<const float*>(buf + off);
     };
-    for (int vo = 0x40; vo <= 0x120; vo += 0x10) {
+    const int max_off = buf_sz - 64; // matrix = 16 floats = 64 bytes
+    for (int vo = 0x10; vo <= max_off; vo += 0x10) {
         if (!matrix_window_sane(at(vo), true)) continue;
-        for (int po = 0x40; po <= 0x120; po += 0x10) {
+        for (int po = 0x10; po <= max_off; po += 0x10) {
             if (po == vo) continue;
             if (!matrix_window_sane(at(po), false)) continue;
             view_off = vo; proj_off = po;
@@ -650,6 +653,23 @@ inline bool detect_pair(uint64_t obj, matrix& view, matrix& projection,
         }
     }
     return false;
+}
+
+// Auto-detect FOV from a native Camera object by scanning for plausible float
+inline float detect_fov(uint64_t camera_native) {
+    uint8_t buf[0x200]{};
+    if (!mem_read(camera_native, buf, sizeof(buf))) return 0.f;
+    for (int off = 0x10; off < (int)sizeof(buf) - 4; off += 4) {
+        float val;
+        std::memcpy(&val, buf + off, 4);
+        if (std::isfinite(val) && val >= 30.f && val <= 120.f) {
+            float rounded = std::round(val);
+            if (std::fabs(val - rounded) < 0.5f && rounded >= 40.f && rounded <= 90.f) {
+                return val;
+            }
+        }
+    }
+    return 0.f;
 }
 
 inline void remember_camera(uint64_t address, const matrix& view, const matrix& projection,

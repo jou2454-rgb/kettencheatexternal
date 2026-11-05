@@ -261,16 +261,19 @@ namespace player {
             else if (live_aim) rotation = aim_rotation;
             forward_y = rotate(rotation, Vector3(0.f, 0.f, 1.f)).y;
             const float aspect = g_sw / std::max(g_sh, 1.f);
-            // Primary: ios pivot position + eye height offset
             const matrix vm = view_from_pose(position, rotation);
-            for (float fov : {60.f, 65.f, 70.f, 55.f, 75.f})
-                result.push_back({native, vm, perspective(fov, aspect)});
-            // Secondary: use aim transform position (weapon hit-point) as
-            // camera origin — may be closer to the real camera eye position
+            if (g_detected_fov > 0.f) {
+                // Auto-detected FOV from real camera — single candidate
+                result.push_back({native, vm, perspective(g_detected_fov, aspect)});
+            } else {
+                // No FOV detected yet — try several values, scoring picks best
+                for (float fov : {60.f, 65.f, 70.f, 55.f, 75.f})
+                    result.push_back({native, vm, perspective(fov, aspect)});
+            }
             if (live_aim) {
                 const matrix vm2 = view_from_pose(aim_position, rotation);
-                for (float fov : {60.f, 65.f, 70.f})
-                    result.push_back({native, vm2, perspective(fov, aspect)});
+                float aim_fov = g_detected_fov > 0.f ? g_detected_fov : 65.f;
+                result.push_back({native, vm2, perspective(aim_fov, aspect)});
             }
             selected_offset = offset;
             break;

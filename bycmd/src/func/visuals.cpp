@@ -175,6 +175,63 @@ void visuals::draw() {
         }
     }
 
+    // il2cpp chain camera: finds the managed Camera through component fields,
+    // then reads real V/P from its native pointer. Heavy scan throttled to
+    // once per 5 seconds; cached native + offsets reused every frame.
+    {
+        static uint64_t s_il2cpp_native = 0;
+        static int s_il2cpp_voff = -1, s_il2cpp_poff = -1;
+        static long long s_il2cpp_resolve = 0;
+        static float s_detected_fov = 0.f;
+        const long long now_ms = diag::now_ms();
+        bool need_resolve = (now_ms - s_il2cpp_resolve > 5000) || !s_il2cpp_native;
+        if (!need_resolve && s_il2cpp_native && s_il2cpp_voff >= 0) {
+            // Fast path: read matrices at cached offsets
+            camera_candidate cc;
+            cc.address = s_il2cpp_native;
+            matrix v{}, p{};
+            if (mem_read(s_il2cpp_native + uint64_t(s_il2cpp_voff), &v, sizeof(v)) &&
+                mem_read(s_il2cpp_native + uint64_t(s_il2cpp_poff), &p, sizeof(p)) &&
+                matrix_window_sane(reinterpret_cast<float*>(&v), true) &&
+                matrix_window_sane(reinterpret_cast<float*>(&p), false)) {
+                cc.view = v; cc.projection = p;
+                cc.view_off = s_il2cpp_voff;
+                cc.proj_off = s_il2cpp_poff;
+                Cameras.push_back(cc);
+            } else {
+                s_il2cpp_native = 0;
+            }
+        } else if (need_resolve) {
+            s_il2cpp_resolve = now_ms;
+            uint64_t native = 0;
+            matrix v{}, p{};
+            if (main_camera_matrices(LocalPlayer, native, v, p)) {
+                s_il2cpp_native = native;
+                s_il2cpp_voff = g_main_cam.view_off;
+                s_il2cpp_poff = g_main_cam.proj_off;
+                camera_candidate cc;
+                cc.address = native;
+                cc.view = v; cc.projection = p;
+                cc.view_off = s_il2cpp_voff;
+                cc.proj_off = s_il2cpp_poff;
+                Cameras.push_back(cc);
+                float fov = detect_fov(native);
+                if (fov > 0.f) {
+                    s_detected_fov = fov;
+                    static long long fov_log = 0;
+                    if (diag::every(fov_log, 10000))
+                        diag::log("CAMERA", "il2cpp FOV detected: %.1f°", fov);
+                }
+                static long long il2cpp_log = 0;
+                if (diag::every(il2cpp_log, 5000))
+                    diag::log("CAMERA", "il2cpp cam native=0x%llx voff=+0x%x poff=+0x%x fov=%.1f",
+                              (unsigned long long)native, s_il2cpp_voff, s_il2cpp_poff, s_detected_fov);
+            }
+        }
+        // Pass detected FOV to Transform fallback cameras
+        if (s_detected_fov > 0.f) g_detected_fov = s_detected_fov;
+    }
+
     std::vector<camera_candidate> TransformCameras =
         player::camera_fallback_candidates(LocalPlayer);
     Cameras.insert(Cameras.end(), TransformCameras.begin(), TransformCameras.end());

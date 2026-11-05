@@ -10,7 +10,6 @@
 #include "ui/menu.hpp"
 #include "ui/bar.hpp"
 #include "other/memory.hpp"
-#include "other/safe_read.hpp"
 #include "game/game.hpp"
 #include "func/visuals.hpp"
 #include "protect/oxorany.hpp"
@@ -41,7 +40,6 @@ int main() {
         return 2;
     }
     diag::log("INFO", "bycmd Standoff2 1.0.0 external ESP starting");
-    safe::install();
     screen_config();
 
     int max_size = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);

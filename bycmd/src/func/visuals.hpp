@@ -1,21 +1,16 @@
+#ifndef VISUALS_HPP
+#define VISUALS_HPP
 
-// ================================================================================
-// -----------------[ TELEGRAM SOURCE ]-----------------
-// * BOT:     t.me/imguisource_bot
-// * CHANNEL: t.me/ImGui_Source_FIXNEY (ImGui Source)
-// * CH 2:    t.me/il2cpp_src (shit src 🧨)
-// -----------------------------------------------------
-// ================================================================================
+#include <imgui.h>
+#include "../other/vector3.h"
 
-#pragma once
+struct UnityMatrix4x4 {
+    float m[16];
+};
 
-#include "imgui.h"
-
-namespace visuals {
-    void draw();
-    void dbox(const ImVec2& t, const ImVec2& b, float a);
-    void dhp(int hp, const ImVec2& t, const ImVec2& b, float box_h, float a);
-    void dnick(const char* name, const ImVec2& box_max, float cx, float sz, float a);
-    void ddist(float dist, float x, float y, float sz, float a);
-    void draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text);
+namespace Visuals {
+    void DrawESP();
+    bool WorldToScreen(const Vector3& world_pos, const UnityMatrix4x4& view_matrix, int screen_width, int screen_height, Vector3& screen_pos);
 }
+
+#endif // VISUALS_HPP

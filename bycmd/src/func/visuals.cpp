@@ -1,548 +1,862 @@
-
-// ================================================================================
-// Сурс взят из бота @imguisource_bot
-// Подпишись на ImGui Source: t.me/ImGui_Source_FIXNEY
-// Подпишись на shit src 🧨: t.me/il2cpp_src
-// ================================================================================
+// visuals.cpp — Internal autonomous ESP for Standoff 2 (Unity 6, ARM64)
+// No hardcoded offsets. Resolves il2cpp API + Unity icalls at runtime.
+// Discovers player class by field-signature fingerprinting.
 
 #include "visuals.hpp"
-#include "../game/game.hpp"
-#include "../game/math.hpp"
-#include "../game/player.hpp"
-#include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
-#include "../protect/oxorany.hpp"
+#include "../ui/theme/theme.hpp"
 #include "imgui.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <cmath>
-#include <algorithm>
-#include <unordered_map>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#define ESPLOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "esp", fmt, ##__VA_ARGS__)
+#define ESPWARN(fmt, ...) __android_log_print(ANDROID_LOG_WARN, "esp", fmt, ##__VA_ARGS__)
+#else
+#define ESPLOG(fmt, ...) do { fprintf(stderr, "[ESP] " fmt "\n", ##__VA_ARGS__); } while(0)
+#define ESPWARN(fmt, ...) do { fprintf(stderr, "[ESP-W] " fmt "\n", ##__VA_ARGS__); } while(0)
+#endif
 
 extern ImFont* espFont;
 
-static void esp_wait(const char* stage) {
-    static long long last = 0;
-    if (diag::every(last, 5000)) diag::log("WAIT", "ESP blocked at: %s", stage);
+// ===================================================================
+// Math
+// ===================================================================
+struct Vec3  { float x, y, z; };
+struct Mat4  { float m[4][4]; };
+
+static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
+    Mat4 r{};
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 4; k++)
+                r.m[i][j] += a.m[i][k] * b.m[k][j];
+    return r;
 }
 
-void visuals::draw() {
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
-    if (!any) { esp_wait("all ESP options disabled"); return; }
+static bool w2s(const Mat4& vp, const Vec3& pos, float sw, float sh, ImVec2& out) {
+    float x = vp.m[0][0]*pos.x + vp.m[0][1]*pos.y + vp.m[0][2]*pos.z + vp.m[0][3];
+    float y = vp.m[1][0]*pos.x + vp.m[1][1]*pos.y + vp.m[1][2]*pos.z + vp.m[1][3];
+    float w = vp.m[3][0]*pos.x + vp.m[3][1]*pos.y + vp.m[3][2]*pos.z + vp.m[3][3];
+    if (w < 0.001f) return false;
+    float iw = 1.f / w;
+    out.x = (0.5f + x * iw * 0.5f) * sw;
+    out.y = (0.5f - y * iw * 0.5f) * sh;
+    return true;
+}
 
-    std::vector<uint64_t> Players = players();
-    if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
-    struct name_cache_entry { uint32_t id{}; std::string name; long long refreshed{}; };
-    static std::unordered_map<uint64_t, name_cache_entry> name_cache;
-    static size_t name_cursor = 0;
-    // Resolve at most one name per frame. Name discovery touches several
-    // component objects, so batching all ten players caused visible UI stalls.
-    {
-        const uint64_t object = Players[name_cursor++ % Players.size()];
-        const uint32_t id = rpm<uint32_t>(object + v100::net_object_id);
-        name_cache_entry& entry = name_cache[object];
-        const long long now = diag::now_ms();
-        if (entry.id != id || now - entry.refreshed > 5000) {
-            entry.id = id;
-            entry.name = player_name(object);
-            entry.refreshed = now;
-        }
+// ===================================================================
+// Safe pointer validation (/dev/null write check)
+// ===================================================================
+static int g_null_fd = -1;
+
+static bool ptr_ok(const void* p, size_t sz = 4) {
+    if (!p) return false;
+    auto a = (uintptr_t)p;
+    if (a < 0x10000) return false;
+    if (g_null_fd < 0) g_null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (g_null_fd < 0) return a > 0x10000;
+    return write(g_null_fd, p, sz) == (ssize_t)sz;
+}
+
+template<typename T>
+static bool safe_read(const void* addr, T& out) {
+    if (!ptr_ok(addr, sizeof(T))) return false;
+    __builtin_memcpy(&out, addr, sizeof(T));
+    return true;
+}
+
+static bool read_il2cpp_string(void* str, char* buf, int buf_sz) {
+    if (!ptr_ok(str, 0x16)) { buf[0] = 0; return false; }
+    int32_t len;
+    __builtin_memcpy(&len, (uint8_t*)str + 0x10, 4);
+    if (len <= 0 || len > 200) { buf[0] = 0; return false; }
+    const char16_t* chars = (const char16_t*)((uint8_t*)str + 0x14);
+    if (!ptr_ok(chars, len * 2)) { buf[0] = 0; return false; }
+    int o = 0;
+    for (int i = 0; i < len && o < buf_sz - 1; i++) {
+        char16_t c;
+        __builtin_memcpy(&c, &chars[i], 2);
+        buf[o++] = (c < 128) ? (char)c : '?';
     }
-    static long long object_log = 0;
-    if (diag::every(object_log, 10000)) {
-        for (size_t i = 0; i < Players.size(); ++i) {
-            const uint64_t object = Players[i];
-            const Vector3 position = player::position(object);
-            std::string name_text = name_cache[object].name;
-            if (name_text.empty()) name_text = "<name unavailable>";
-            diag::log("PLAYER", "[%zu] object=0x%llx id=%u name=%s local=%d team=%d hp=%d pos=(%.3f %.3f %.3f)",
-                      i, (unsigned long long)object, rpm<uint32_t>(object + v100::net_object_id),
-                      name_text.c_str(), player::local(object) ? 1 : 0, player::team(object),
-                      player::health(object), position.x, position.y, position.z);
-        }
+    buf[o] = 0;
+    return o > 0;
+}
+
+// ===================================================================
+// Il2Cpp API function pointer types
+// ===================================================================
+#define ILFN(ret, name, ...) typedef ret (*fn_##name)(__VA_ARGS__)
+
+ILFN(void*,  domain_get,            void);
+ILFN(void**, domain_get_assemblies,  void*, size_t*);
+ILFN(void*,  assembly_get_image,     void*);
+ILFN(size_t, image_get_class_count,  void*);
+ILFN(void*,  image_get_class,        void*, size_t);
+ILFN(const char*, image_get_name,    void*);
+ILFN(const char*, class_get_name,    void*);
+ILFN(const char*, class_get_namespace, void*);
+ILFN(void*,  class_get_parent,       void*);
+ILFN(size_t, class_num_fields,       void*);
+ILFN(void*,  class_get_fields,       void*, void**);
+ILFN(const char*, field_get_name,    void*);
+ILFN(size_t, field_get_offset,       void*);
+ILFN(void*,  field_get_type,         void*);
+ILFN(int,    type_get_type,          void*);
+ILFN(void*,  class_get_type,         void*);
+ILFN(void*,  type_get_object,        void*);
+ILFN(void*,  resolve_icall,          const char*);
+ILFN(void*,  thread_attach,          void*);
+ILFN(void,   thread_detach,          void*);
+ILFN(void*,  class_from_name,        void*, const char*, const char*);
+ILFN(void*,  class_get_method_from_name, void*, const char*, int);
+ILFN(void*,  runtime_invoke,         void*, void*, void**, void**);
+ILFN(int,    field_get_flags,        void*);
+
+typedef void* (*fn_cam_main)(void);
+typedef void  (*fn_cam_matrix)(void*, Mat4*);
+typedef void* (*fn_get_transform)(void*);
+typedef void  (*fn_get_position)(void*, Vec3*);
+
+enum {
+    T_BOOL   = 0x02,
+    T_I4     = 0x08,
+    T_U4     = 0x09,
+    T_R4     = 0x0C,
+    T_STRING = 0x0E,
+    T_CLASS  = 0x12,
+    T_ARRAY  = 0x14,
+    T_GENINS = 0x15,
+};
+
+// ===================================================================
+// API singleton
+// ===================================================================
+static struct API {
+    bool ok = false;
+    void* lib = nullptr;
+
+    fn_domain_get              domain_get;
+    fn_domain_get_assemblies   domain_get_assemblies;
+    fn_assembly_get_image      assembly_get_image;
+    fn_image_get_class_count   image_get_class_count;
+    fn_image_get_class         image_get_class;
+    fn_image_get_name          image_get_name;
+    fn_class_get_name          class_get_name;
+    fn_class_get_namespace     class_get_namespace;
+    fn_class_get_parent        class_get_parent;
+    fn_class_num_fields        class_num_fields;
+    fn_class_get_fields        class_get_fields;
+    fn_field_get_name          field_get_name;
+    fn_field_get_offset        field_get_offset;
+    fn_field_get_type          field_get_type;
+    fn_type_get_type           type_get_type;
+    fn_class_get_type          class_get_type;
+    fn_type_get_object         type_get_object;
+    fn_resolve_icall           resolve_icall;
+    fn_thread_attach           thread_attach;
+    fn_thread_detach           thread_detach;
+    fn_class_from_name         class_from_name;
+    fn_class_get_method_from_name class_get_method_from_name;
+    fn_runtime_invoke          runtime_invoke;
+    fn_field_get_flags         field_get_flags;
+
+    fn_cam_main        cam_main;
+    fn_cam_matrix      cam_view;
+    fn_cam_matrix      cam_proj;
+    fn_get_transform   get_transform;
+    fn_get_position    get_position;
+} api;
+
+// ===================================================================
+// Stage 1: Resolve il2cpp API via dlsym
+// ===================================================================
+static bool resolve_api() {
+    if (api.ok) return true;
+
+    api.lib = dlopen("libil2cpp.so", RTLD_NOLOAD);
+    if (!api.lib) return false;
+
+#define S(f, sym) api.f = (decltype(api.f))dlsym(api.lib, sym); \
+    if (!api.f) { ESPWARN("sym miss: %s", sym); return false; }
+
+    S(domain_get,             "il2cpp_domain_get")
+    S(domain_get_assemblies,  "il2cpp_domain_get_assemblies")
+    S(assembly_get_image,     "il2cpp_assembly_get_image")
+    S(image_get_class_count,  "il2cpp_image_get_class_count")
+    S(image_get_class,        "il2cpp_image_get_class")
+    S(image_get_name,         "il2cpp_image_get_name")
+    S(class_get_name,         "il2cpp_class_get_name")
+    S(class_get_namespace,    "il2cpp_class_get_namespace")
+    S(class_get_parent,       "il2cpp_class_get_parent")
+    S(class_num_fields,       "il2cpp_class_num_fields")
+    S(class_get_fields,       "il2cpp_class_get_fields")
+    S(field_get_name,         "il2cpp_field_get_name")
+    S(field_get_offset,       "il2cpp_field_get_offset")
+    S(field_get_type,         "il2cpp_field_get_type")
+    S(type_get_type,          "il2cpp_type_get_type")
+    S(class_get_type,         "il2cpp_class_get_type")
+    S(type_get_object,        "il2cpp_type_get_object")
+    S(resolve_icall,          "il2cpp_resolve_icall")
+    S(thread_attach,          "il2cpp_thread_attach")
+    S(thread_detach,          "il2cpp_thread_detach")
+    S(class_from_name,        "il2cpp_class_from_name")
+    S(class_get_method_from_name, "il2cpp_class_get_method_from_name")
+    S(runtime_invoke,         "il2cpp_runtime_invoke")
+#undef S
+
+    api.field_get_flags = (fn_field_get_flags)dlsym(api.lib, "il2cpp_field_get_flags");
+    api.ok = true;
+    ESPLOG("il2cpp API resolved");
+    return true;
+}
+
+// ===================================================================
+// Stage 2: Resolve Unity icalls + thread attach
+// ===================================================================
+static void* g_thread = nullptr;
+
+static bool resolve_icalls() {
+    if (api.cam_main) return true;
+
+    void* domain = api.domain_get();
+    if (!domain) return false;
+
+    if (!g_thread) {
+        g_thread = api.thread_attach(domain);
+        if (!g_thread) return false;
+        ESPLOG("thread attached");
     }
-    uint64_t LocalPlayer = 0;
-    for (uint64_t p : Players) if (player::local(p)) { LocalPlayer = p; break; }
-    if (!LocalPlayer) { esp_wait("local player flag"); return; }
-    Vector3 LocalPosition = player::position(LocalPlayer);
-    int LocalTeam = player::team(LocalPlayer);
-    if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
-    if (!std::isfinite(LocalPosition.x) ||
-        (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
-        esp_wait("local transform hierarchy"); return;
-    }
-    int enemies = 0, alive = 0, positioned = 0, projected = 0;
-    struct enemy_frame {
-        uint64_t object{};
-        Vector3 position{};
-        int health{};
-        float distance{};
+
+    auto try_icall = [](const char* a, const char* b = nullptr) -> void* {
+        void* p = api.resolve_icall(a);
+        if (!p && b) p = api.resolve_icall(b);
+        return p;
     };
-    std::vector<enemy_frame> frame_enemies;
-    for (uint64_t Player : Players) {
-        if (!Player || Player == LocalPlayer) continue;
-        int PlayerTeam = player::team(Player);
-        if (PlayerTeam == LocalTeam || (PlayerTeam != 1 && PlayerTeam != 2)) continue;
-        ++enemies;
 
-        Vector3 PlayerPosition = player::position(Player);
-        if (PlayerPosition.x == 0.f && PlayerPosition.y == 0.f && PlayerPosition.z == 0.f) continue;
-        ++positioned;
+    api.cam_main = (fn_cam_main)try_icall(
+        "UnityEngine.Camera::get_main()",
+        "UnityEngine.Camera::get_main");
+    if (!api.cam_main) { ESPWARN("icall: Camera::get_main miss"); return false; }
 
-        int Health = player::health(Player);
-        if (Health <= 0) continue;
-        ++alive;
+    api.cam_view = (fn_cam_matrix)try_icall(
+        "UnityEngine.Camera::get_worldToCameraMatrix_Injected(UnityEngine.Matrix4x4&)",
+        "UnityEngine.Camera::get_worldToCameraMatrix_Injected");
+    if (!api.cam_view) { ESPWARN("icall: cam_view miss"); return false; }
 
-        float Distance = calculate_distance(PlayerPosition, LocalPosition);
-        if (Distance > 500.f) continue;
+    api.cam_proj = (fn_cam_matrix)try_icall(
+        "UnityEngine.Camera::get_projectionMatrix_Injected(UnityEngine.Matrix4x4&)",
+        "UnityEngine.Camera::get_projectionMatrix_Injected");
+    if (!api.cam_proj) { ESPWARN("icall: cam_proj miss"); return false; }
 
-        frame_enemies.push_back({Player, PlayerPosition, Health, Distance});
+    api.get_transform = (fn_get_transform)try_icall(
+        "UnityEngine.Component::get_transform()",
+        "UnityEngine.Component::get_transform");
+    if (!api.get_transform) { ESPWARN("icall: get_transform miss"); return false; }
+
+    api.get_position = (fn_get_position)try_icall(
+        "UnityEngine.Transform::get_position_Injected(UnityEngine.Vector3&)",
+        "UnityEngine.Transform::get_position_Injected");
+    if (!api.get_position) { ESPWARN("icall: get_position miss"); return false; }
+
+    ESPLOG("all icalls resolved");
+    return true;
+}
+
+// ===================================================================
+// Il2Cpp array helper
+// ===================================================================
+struct ArrayView {
+    void** items;
+    int32_t count;
+};
+
+static ArrayView read_array(void* arr) {
+    ArrayView v{nullptr, 0};
+    if (!arr || !ptr_ok(arr, 0x28)) return v;
+    int32_t len;
+    __builtin_memcpy(&len, (uint8_t*)arr + 0x18, 4);
+    if (len <= 0 || len > 500) return v;
+    void** elems = (void**)((uint8_t*)arr + 0x20);
+    if (!ptr_ok(elems, (size_t)len * 8)) return v;
+    v.items = elems;
+    v.count = len;
+    return v;
+}
+
+// ===================================================================
+// FindObjectsOfType wrapper
+// ===================================================================
+typedef void* (*fn_fot2)(void*, bool);
+typedef void* (*fn_fot1)(void*);
+static fn_fot2 g_fot2 = nullptr;
+static fn_fot1 g_fot1 = nullptr;
+static bool    g_fot_tried = false;
+
+static void init_fot() {
+    if (g_fot_tried) return;
+    g_fot_tried = true;
+
+    g_fot2 = (fn_fot2)api.resolve_icall(
+        "UnityEngine.Object::FindObjectsOfType(System.Type,System.Boolean)");
+    if (g_fot2) { ESPLOG("FindObjectsOfType (2-arg) resolved"); return; }
+
+    g_fot1 = (fn_fot1)api.resolve_icall(
+        "UnityEngine.Object::FindObjectsOfType(System.Type)");
+    if (g_fot1) { ESPLOG("FindObjectsOfType (1-arg) resolved"); return; }
+
+    ESPWARN("FindObjectsOfType icall not found, will use runtime_invoke fallback");
+}
+
+static void* call_fot(void* klass) {
+    void* il2type = api.class_get_type(klass);
+    if (!il2type) return nullptr;
+    void* managed_type = api.type_get_object(il2type);
+    if (!managed_type) return nullptr;
+
+    if (g_fot2) return g_fot2(managed_type, false);
+    if (g_fot1) return g_fot1(managed_type);
+
+    void* domain = api.domain_get();
+    if (!domain) return nullptr;
+    size_t asm_count = 0;
+    void** asms = api.domain_get_assemblies(domain, &asm_count);
+    for (size_t i = 0; i < asm_count; i++) {
+        void* img = api.assembly_get_image(asms[i]);
+        const char* iname = api.image_get_name(img);
+        if (!iname) continue;
+        if (!strstr(iname, "UnityEngine.CoreModule") && strcmp(iname, "UnityEngine.dll") != 0)
+            continue;
+        void* obj_class = api.class_from_name(img, "UnityEngine", "Object");
+        if (!obj_class) continue;
+        void* method = api.class_get_method_from_name(obj_class, "FindObjectsOfType", 2);
+        if (!method) method = api.class_get_method_from_name(obj_class, "FindObjectsOfType", 1);
+        if (!method) continue;
+        void* exc = nullptr;
+        uint8_t inactive = 0;
+        void* params[2] = { managed_type, &inactive };
+        return api.runtime_invoke(method, nullptr, params, &exc);
+    }
+    return nullptr;
+}
+
+// ===================================================================
+// Player class discovery via fingerprinting
+// ===================================================================
+static bool is_mono_behaviour(void* klass) {
+    void* cur = klass;
+    for (int d = 0; d < 15 && cur; d++) {
+        const char* n = api.class_get_name(cur);
+        if (!n) break;
+        if (strcmp(n, "MonoBehaviour") == 0) return true;
+        cur = api.class_get_parent(cur);
+    }
+    return false;
+}
+
+struct FieldSlot {
+    size_t offset;
+    int    type_enum;
+};
+
+struct PlayerClassInfo {
+    void*  klass        = nullptr;
+    size_t off_is_local = 0;
+    size_t off_hp       = 0;
+    size_t off_team     = 0;
+    size_t off_nickname = 0;
+    bool   valid        = false;
+};
+
+static PlayerClassInfo g_pi;
+
+static int score_class(void* klass,
+                       FieldSlot* bools, int& nb,
+                       FieldSlot* ints,  int& ni,
+                       FieldSlot* strs,  int& ns) {
+    nb = ni = ns = 0;
+    int score = 0, class_refs = 0, total = 0;
+
+    void* iter = nullptr;
+    void* field;
+    while ((field = api.class_get_fields(klass, &iter)) != nullptr) {
+        if (api.field_get_flags) {
+            int fl = api.field_get_flags(field);
+            if (fl & 0x10) continue;
+        }
+        size_t off = api.field_get_offset(field);
+        void* ft = api.field_get_type(field);
+        int te = ft ? api.type_get_type(ft) : 0;
+        total++;
+
+        if (te == T_BOOL && nb < 8)               { bools[nb++] = {off, te}; }
+        else if ((te == T_I4 || te == T_U4) && ni < 8) { ints[ni++] = {off, te}; }
+        else if (te == T_STRING && ns < 4)         { strs[ns++] = {off, te}; }
+        else if (te == T_CLASS || te == T_GENINS)  { class_refs++; }
     }
 
-    std::vector<camera_candidate> Cameras = camera_candidates(LocalPlayer);
+    if (nb >= 1) score += 3;
+    if (ni >= 2) score += 3;
+    if (ns >= 1) score += 2;
+    if (class_refs >= 3) score += 2;
+    if (total >= 8 && total <= 50) score += 1;
 
-    // Static camera pointer probe (Gemini approach): try reading the main
-    // Camera from a known static address in libil2cpp.so, then scan it for
-    // real V/P matrices via detect_pair. If it works, this camera gets the
-    // +200 score bonus (view_off >= 0) and eliminates displacement.
-    {
-        static uint64_t s_static_cam = 0;
-        static long long s_static_ts = 0;
-        const long long now_ms = diag::now_ms();
-        if (now_ms - s_static_ts > 2000) {
-            s_static_ts = now_ms;
-            s_static_cam = 0;
-            constexpr uint64_t kCameraMain = 0x6BE9604;
-            uint64_t raw = rpm<uint64_t>(proc::lib + kCameraMain);
-            // Try multiple dereference depths: the static slot might point
-            // to a managed object (ptr → native at +0x10) or directly to
-            // a native Camera.
-            uint64_t tries[4] = { raw, 0, 0, 0 };
-            if (plausible(raw)) {
-                tries[1] = rpm<uint64_t>(raw + 0x10); // managed → native
-                tries[2] = rpm<uint64_t>(raw + 0x08); // alternate header
-                tries[3] = rpm<uint64_t>(raw + 0x20); // deeper wrapper
+    const char* cname = api.class_get_name(klass);
+    if (cname) {
+        if (strstr(cname, "Manager") || strstr(cname, "Controller") ||
+            strstr(cname, "Canvas")  || strstr(cname, "Button") ||
+            strstr(cname, "Menu")    || strstr(cname, "Lobby") ||
+            strstr(cname, "UI"))
+            score -= 5;
+    }
+    const char* ns_name = api.class_get_namespace(klass);
+    if (ns_name && (strstr(ns_name, "UI") || strstr(ns_name, "Editor")))
+        score -= 3;
+
+    return score;
+}
+
+static bool validate_player_class(void* klass,
+                                  FieldSlot* bools, int nb,
+                                  FieldSlot* ints,  int ni,
+                                  FieldSlot* strs,  int ns,
+                                  PlayerClassInfo& out) {
+    void* arr = call_fot(klass);
+    ArrayView av = read_array(arr);
+    if (av.count < 2 || av.count > 30) return false;
+
+    for (int bi = 0; bi < nb; bi++) {
+        int local_count = 0;
+        bool ok = true;
+        for (int p = 0; p < av.count; p++) {
+            void* obj = av.items[p];
+            if (!obj || !ptr_ok(obj, bools[bi].offset + 1)) { ok = false; break; }
+            uint8_t val;
+            __builtin_memcpy(&val, (uint8_t*)obj + bools[bi].offset, 1);
+            if (val == 1) local_count++;
+        }
+        if (!ok || local_count != 1) continue;
+
+        for (int hi = 0; hi < ni; hi++) {
+            bool hp_ok = true;
+            for (int p = 0; p < av.count; p++) {
+                void* obj = av.items[p];
+                if (!ptr_ok(obj, ints[hi].offset + 4)) { hp_ok = false; break; }
+                int32_t v;
+                __builtin_memcpy(&v, (uint8_t*)obj + ints[hi].offset, 4);
+                if (v < 0 || v > 200) { hp_ok = false; break; }
             }
-            for (int t = 0; t < 4; ++t) {
-                uint64_t cam = tries[t];
-                if (!plausible(cam)) continue;
-                camera_candidate cc;
-                cc.address = cam;
-                if (detect_pair(cam, cc.view, cc.projection, cc.view_off, cc.proj_off, "static")) {
-                    Cameras.push_back(cc);
-                    s_static_cam = cam;
-                    static long long slog = 0;
-                    if (diag::every(slog, 5000))
-                        diag::log("CAMERA", "static_ptr depth=%d cam=0x%llx voff=+0x%x poff=+0x%x",
-                                  t, (unsigned long long)cam, cc.view_off, cc.proj_off);
-                    break;
+            if (!hp_ok) continue;
+
+            for (int ti = 0; ti < ni; ti++) {
+                if (ti == hi) continue;
+                bool team_ok = true;
+                for (int p = 0; p < av.count; p++) {
+                    void* obj = av.items[p];
+                    if (!ptr_ok(obj, ints[ti].offset + 4)) { team_ok = false; break; }
+                    int32_t v;
+                    __builtin_memcpy(&v, (uint8_t*)obj + ints[ti].offset, 4);
+                    if (v < 0 || v > 10) { team_ok = false; break; }
                 }
-                // Also try validate_camera (hardcoded 0x70/0xB0)
-                matrix v{}, p{};
-                if (validate_camera(cam, v, p)) {
-                    cc.view = v;
-                    cc.projection = p;
-                    cc.view_off = int(v100::camera_view);
-                    cc.proj_off = int(v100::camera_projection);
-                    Cameras.push_back(cc);
-                    s_static_cam = cam;
-                    static long long slog2 = 0;
-                    if (diag::every(slog2, 5000))
-                        diag::log("CAMERA", "static_ptr(validate) depth=%d cam=0x%llx",
-                                  t, (unsigned long long)cam);
-                    break;
-                }
+                if (!team_ok) continue;
+
+                out.klass        = klass;
+                out.off_is_local = bools[bi].offset;
+                out.off_hp       = ints[hi].offset;
+                out.off_team     = ints[ti].offset;
+                out.off_nickname = (ns > 0) ? strs[0].offset : 0;
+                out.valid = true;
+
+                ESPLOG("FOUND player class: %s  instances=%d",
+                       api.class_get_name(klass), av.count);
+                ESPLOG("  isLocal@0x%x  HP@0x%x  team@0x%x  nick@0x%x",
+                       (unsigned)out.off_is_local, (unsigned)out.off_hp,
+                       (unsigned)out.off_team, (unsigned)out.off_nickname);
+                return true;
             }
-            if (!s_static_cam) {
-                static long long flog = 0;
-                if (diag::every(flog, 10000))
-                    diag::log("CAMERA", "static_ptr MISS raw=0x%llx (no valid matrices at any depth)",
-                              (unsigned long long)raw);
-            }
-        } else if (s_static_cam) {
-            // Fast path: re-read cached static camera (2 rpm reads)
-            camera_candidate cc;
-            cc.address = s_static_cam;
-            if (detect_pair(s_static_cam, cc.view, cc.projection, cc.view_off, cc.proj_off, "static_cached")) {
-                Cameras.push_back(cc);
+        }
+    }
+    return false;
+}
+
+static bool discover_player_class() {
+    if (g_pi.valid) return true;
+
+    init_fot();
+
+    void* domain = api.domain_get();
+    if (!domain) return false;
+
+    size_t asm_count = 0;
+    void** asms = api.domain_get_assemblies(domain, &asm_count);
+
+    struct Candidate { void* klass; int score; };
+    Candidate best[16];
+    int nbest = 0;
+
+    for (size_t ai = 0; ai < asm_count; ai++) {
+        void* img = api.assembly_get_image(asms[ai]);
+        if (!img) continue;
+        size_t cc = api.image_get_class_count(img);
+        for (size_t ci = 0; ci < cc; ci++) {
+            void* klass = api.image_get_class(img, ci);
+            if (!klass) continue;
+            if (!is_mono_behaviour(klass)) continue;
+
+            FieldSlot bools[8], ints_arr[8], strs[4];
+            int n_b, n_i, n_s;
+            int sc = score_class(klass, bools, n_b, ints_arr, n_i, strs, n_s);
+            if (sc < 6) continue;
+
+            if (nbest < 16) {
+                best[nbest++] = {klass, sc};
             } else {
-                matrix v{}, p{};
-                if (validate_camera(s_static_cam, v, p)) {
-                    cc.view = v; cc.projection = p;
-                    cc.view_off = int(v100::camera_view);
-                    cc.proj_off = int(v100::camera_projection);
-                    Cameras.push_back(cc);
-                }
+                int worst_i = 0;
+                for (int j = 1; j < 16; j++)
+                    if (best[j].score < best[worst_i].score) worst_i = j;
+                if (sc > best[worst_i].score)
+                    best[worst_i] = {klass, sc};
             }
         }
     }
 
-    // il2cpp chain camera: finds the managed Camera through component fields,
-    // then reads real V/P from its native pointer. Heavy scan throttled to
-    // once per 5 seconds; cached native + offsets reused every frame.
-    {
-        static uint64_t s_il2cpp_native = 0;
-        static int s_il2cpp_voff = -1, s_il2cpp_poff = -1;
-        static long long s_il2cpp_resolve = 0;
-        static float s_detected_fov = 0.f;
-        const long long now_ms = diag::now_ms();
-        bool need_resolve = (now_ms - s_il2cpp_resolve > 5000) || !s_il2cpp_native;
-        if (!need_resolve && s_il2cpp_native && s_il2cpp_voff >= 0) {
-            // Fast path: read matrices at cached offsets
-            camera_candidate cc;
-            cc.address = s_il2cpp_native;
-            matrix v{}, p{};
-            if (mem_read(s_il2cpp_native + uint64_t(s_il2cpp_voff), &v, sizeof(v)) &&
-                mem_read(s_il2cpp_native + uint64_t(s_il2cpp_poff), &p, sizeof(p)) &&
-                matrix_window_sane(reinterpret_cast<float*>(&v), true) &&
-                matrix_window_sane(reinterpret_cast<float*>(&p), false)) {
-                cc.view = v; cc.projection = p;
-                cc.view_off = s_il2cpp_voff;
-                cc.proj_off = s_il2cpp_poff;
-                Cameras.push_back(cc);
-            } else {
-                s_il2cpp_native = 0;
+    for (int i = 0; i < nbest - 1; i++)
+        for (int j = i + 1; j < nbest; j++)
+            if (best[j].score > best[i].score) {
+                Candidate tmp = best[i]; best[i] = best[j]; best[j] = tmp;
             }
-        } else if (need_resolve) {
-            s_il2cpp_resolve = now_ms;
-            static bool s_il2cpp_disabled = false;
-            static int s_il2cpp_slow_count = 0;
-            if (!s_il2cpp_disabled) {
-                long long t0 = diag::now_ms();
-                uint64_t native = 0;
-                matrix v{}, p{};
-                bool found = main_camera_matrices(LocalPlayer, native, v, p);
-                long long elapsed = diag::now_ms() - t0;
-                if (elapsed > 100) {
-                    ++s_il2cpp_slow_count;
-                    diag::log("CAMERA", "il2cpp scan took %lldms (slow #%d)", elapsed, s_il2cpp_slow_count);
-                    if (s_il2cpp_slow_count >= 3) {
-                        s_il2cpp_disabled = true;
-                        diag::log("CAMERA", "il2cpp scan DISABLED (too slow, 3+ hits >100ms)");
-                    }
-                } else {
-                    s_il2cpp_slow_count = 0;
-                }
-                if (found) {
-                    s_il2cpp_native = native;
-                    s_il2cpp_voff = g_main_cam.view_off;
-                    s_il2cpp_poff = g_main_cam.proj_off;
-                    camera_candidate cc;
-                    cc.address = native;
-                    cc.view = v; cc.projection = p;
-                    cc.view_off = s_il2cpp_voff;
-                    cc.proj_off = s_il2cpp_poff;
-                    Cameras.push_back(cc);
-                    float fov = detect_fov(native);
-                    if (fov > 0.f) {
-                        s_detected_fov = fov;
-                        static long long fov_log = 0;
-                        if (diag::every(fov_log, 10000))
-                            diag::log("CAMERA", "il2cpp FOV detected: %.1f°", fov);
-                    }
-                    static long long il2cpp_log = 0;
-                    if (diag::every(il2cpp_log, 5000))
-                        diag::log("CAMERA", "il2cpp cam native=0x%llx voff=+0x%x poff=+0x%x fov=%.1f elapsed=%lldms",
-                                  (unsigned long long)native, s_il2cpp_voff, s_il2cpp_poff, s_detected_fov, elapsed);
-                }
-            }
-        }
-        // Pass detected FOV to Transform fallback cameras
-        if (s_detected_fov > 0.f) g_detected_fov = s_detected_fov;
+
+    ESPLOG("fingerprint: %d candidates from %zu assemblies", nbest, asm_count);
+
+    for (int i = 0; i < nbest; i++) {
+        FieldSlot bools[8], ints_arr[8], strs[4];
+        int n_b, n_i, n_s;
+        score_class(best[i].klass, bools, n_b, ints_arr, n_i, strs, n_s);
+
+        ESPLOG("  trying: %s (score=%d)", api.class_get_name(best[i].klass), best[i].score);
+
+        if (validate_player_class(best[i].klass, bools, n_b, ints_arr, n_i, strs, n_s, g_pi))
+            return true;
     }
 
-    std::vector<camera_candidate> TransformCameras =
-        player::camera_fallback_candidates(LocalPlayer);
-    Cameras.insert(Cameras.end(), TransformCameras.begin(), TransformCameras.end());
-    if (Cameras.empty()) { esp_wait("native / transform camera resolution"); return; }
+    ESPWARN("player class not found (not in match?)");
+    return false;
+}
 
-    matrix ViewMatrix{}, ProjectionMatrix{};
-    uint64_t selected_camera = 0;
-    int selected_score = -1, selected_front = 0, selected_onscreen = 0;
-    float selected_camera_distance = 1000000.f;
-    static long long candidate_log = 0;
-    const bool log_candidates = diag::every(candidate_log, 5000);
-    for (const auto& Camera : Cameras) {
-        int score = 0, front = 0, onscreen = 0;
-        if (Camera.view_off >= 0) score += 200;
-        const float* view = reinterpret_cast<const float*>(&Camera.view);
-        const Vector3 camera_position(
-            -(view[0] * view[12] + view[1] * view[13] + view[2] * view[14]),
-            -(view[4] * view[12] + view[5] * view[13] + view[6] * view[14]),
-            -(view[8] * view[12] + view[9] * view[13] + view[10] * view[14]));
-        const float camera_distance = calculate_distance(camera_position, LocalPosition);
-        if (camera_distance < 2.f) score += 100;
-        else if (camera_distance < 10.f) score += 80;
-        else if (camera_distance < 30.f) score += 30;
-        const float* projection = reinterpret_cast<const float*>(&Camera.projection);
-        if (std::fabs(projection[11]) > .5f && std::fabs(projection[15]) < .1f) score += 30;
-        for (const auto& Enemy : frame_enemies) {
-            Vector3 Head(Enemy.position.x, Enemy.position.y + 1.67f, Enemy.position.z);
-            ImVec2 screen_head, screen_foot;
-            if (!world_to_screen(Head, Camera.view, Camera.projection, screen_head) ||
-                !world_to_screen(Enemy.position, Camera.view, Camera.projection, screen_foot)) continue;
-            if (!std::isfinite(screen_head.x) || !std::isfinite(screen_head.y) ||
-                !std::isfinite(screen_foot.x) || !std::isfinite(screen_foot.y)) continue;
-            ++front;
-            ++score;
-            const bool head_inside = screen_head.x >= -g_sw * .25f && screen_head.x <= g_sw * 1.25f &&
-                                     screen_head.y >= -g_sh * .25f && screen_head.y <= g_sh * 1.25f;
-            const bool foot_inside = screen_foot.x >= -g_sw * .25f && screen_foot.x <= g_sw * 1.25f &&
-                                     screen_foot.y >= -g_sh * .25f && screen_foot.y <= g_sh * 1.25f;
-            const float body_height = std::fabs(screen_foot.y - screen_head.y);
-            if (head_inside && foot_inside) { ++onscreen; score += 6; }
-            if (body_height >= 2.f && body_height <= g_sh * 1.5f) score += 3;
+// ===================================================================
+// Per-frame game data
+// ===================================================================
+struct PlayerFrame {
+    void* object;
+    Vec3  pos;
+    int32_t hp;
+    int32_t team;
+    bool  is_local;
+    char  nick[64];
+    float dist;
+};
+
+static PlayerFrame  g_pf[32];
+static int          g_pf_count = 0;
+static int          g_local_team = -1;
+static Vec3         g_local_pos{};
+static Mat4         g_vp{};
+static bool         g_vp_ok = false;
+static int          g_frame = 0;
+
+static bool get_camera_vp() {
+    void* cam = api.cam_main();
+    if (!cam || !ptr_ok(cam, 0x10)) return false;
+
+    Mat4 view{}, proj{};
+    api.cam_view(cam, &view);
+    api.cam_proj(cam, &proj);
+
+    float sum = 0.f;
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            sum += fabsf(view.m[i][j]) + fabsf(proj.m[i][j]);
+    if (sum < 0.01f) return false;
+
+    g_vp = mat_mul(proj, view);
+    return true;
+}
+
+static void refresh_players() {
+    g_pf_count = 0;
+    g_local_team = -1;
+
+    if (!g_pi.valid) return;
+
+    void* arr = call_fot(g_pi.klass);
+    ArrayView av = read_array(arr);
+    if (av.count <= 0) return;
+
+    Vec3 local_pos{};
+    bool found_local = false;
+
+    for (int i = 0; i < av.count && g_pf_count < 32; i++) {
+        void* obj = av.items[i];
+        if (!obj || !ptr_ok(obj, g_pi.off_hp + 4)) continue;
+
+        void* klass_ptr;
+        __builtin_memcpy(&klass_ptr, obj, 8);
+        if (klass_ptr != g_pi.klass) continue;
+
+        uint8_t is_local;
+        __builtin_memcpy(&is_local, (uint8_t*)obj + g_pi.off_is_local, 1);
+
+        int32_t hp, team;
+        __builtin_memcpy(&hp, (uint8_t*)obj + g_pi.off_hp, 4);
+        __builtin_memcpy(&team, (uint8_t*)obj + g_pi.off_team, 4);
+
+        if (hp <= 0) continue;
+
+        void* transform = api.get_transform(obj);
+        if (!transform || !ptr_ok(transform, 0x10)) continue;
+
+        Vec3 pos{};
+        api.get_position(transform, &pos);
+        if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z)) continue;
+        if (fabsf(pos.x) > 50000.f || fabsf(pos.y) > 50000.f || fabsf(pos.z) > 50000.f) continue;
+
+        if (is_local == 1) {
+            g_local_team = team;
+            g_local_pos = pos;
+            found_local = true;
+            continue;
         }
-        // Keep the current winner on equal scores to avoid camera flicker.
-        if (score > selected_score || (score == selected_score && Camera.address == g_camera)) {
-            selected_score = score;
-            selected_front = front;
-            selected_onscreen = onscreen;
-            selected_camera_distance = camera_distance;
-            selected_camera = Camera.address;
-            ViewMatrix = Camera.view;
-            ProjectionMatrix = Camera.projection;
+
+        PlayerFrame& pf = g_pf[g_pf_count];
+        pf.object = obj;
+        pf.pos = pos;
+        pf.hp = hp;
+        pf.team = team;
+        pf.is_local = false;
+        pf.nick[0] = 0;
+        if (g_pi.off_nickname != 0) {
+            void* str_ptr;
+            if (safe_read((uint8_t*)obj + g_pi.off_nickname, str_ptr))
+                read_il2cpp_string(str_ptr, pf.nick, sizeof(pf.nick));
         }
-        if (log_candidates)
-            diag::log("CAMERA", "candidate=0x%llx score=%d front=%d onscreen=%d localDistance=%.2f proj=(%.3f %.3f)",
-                      (unsigned long long)Camera.address, score, front, onscreen, camera_distance,
-                      Camera.projection.m11, Camera.projection.m22);
+        g_pf_count++;
     }
-    if (!selected_camera || (selected_camera_distance >= 30.f && selected_onscreen == 0)) {
-        g_camera = 0;
-        esp_wait("camera candidates do not project players");
-        return;
-    }
-    if (g_camera != selected_camera) {
-        diag::log("CAMERA", "selected=0x%llx score=%d front=%d onscreen=%d localDistance=%.2f candidates=%zu",
-                  (unsigned long long)selected_camera, selected_score, selected_front,
-                  selected_onscreen, selected_camera_distance, Cameras.size());
-    }
-    g_camera = selected_camera;
 
-    for (const auto& Enemy : frame_enemies) {
-        const uint64_t Player = Enemy.object;
-        const Vector3 PlayerPosition = Enemy.position;
-        const int Health = Enemy.health;
-        const float Distance = Enemy.distance;
-
-        Vector3 HeadPosition(PlayerPosition.x, PlayerPosition.y + 1.67f, PlayerPosition.z);
-
-        ImVec2 ScreenHead, ScreenFoot;
-        bool HeadVisible = world_to_screen(HeadPosition, ViewMatrix, ProjectionMatrix, ScreenHead);
-        bool FootVisible = world_to_screen(PlayerPosition, ViewMatrix, ProjectionMatrix, ScreenFoot);
-        if (!HeadVisible || !FootVisible) continue;
-        ++projected;
-
-        float x1 = roundf(ScreenHead.x);
-        float y1 = roundf(fminf(ScreenHead.y, ScreenFoot.y));
-        float x2 = roundf(ScreenFoot.x);
-        float y2 = roundf(fmaxf(ScreenHead.y, ScreenFoot.y));
-
-        float bh = fabsf(y2 - y1);
-        if (bh < 4.f) continue;
-        float bw = roundf(bh * 0.25f);
-        float cx = roundf((x1 + x2) * 0.5f);
-
-        ImVec2 BoxMin(cx - bw, y1);
-        ImVec2 BoxMax(cx + bw, y2);
-
-        float inv_dist = 1.f / (Distance + 0.1f);
-        float font_sz = std::clamp(400.f * inv_dist, 10.f, 18.f);
-
-        if (cfg::esp::box) {
-            dbox(BoxMin, BoxMax, 1.f);
+    if (found_local) {
+        for (int i = 0; i < g_pf_count; i++) {
+            float dx = g_pf[i].pos.x - g_local_pos.x;
+            float dy = g_pf[i].pos.y - g_local_pos.y;
+            float dz = g_pf[i].pos.z - g_local_pos.z;
+            g_pf[i].dist = sqrtf(dx*dx + dy*dy + dz*dz);
         }
-
-        if (cfg::esp::health) {
-            dhp(Health, BoxMin, BoxMax, bh, 1.f);
-        }
-
-        if (cfg::esp::name) {
-            const auto found = name_cache.find(Player);
-            const char* label = found != name_cache.end() && !found->second.name.empty()
-                ? found->second.name.c_str() : "Enemy";
-            dnick(label, BoxMax, cx, font_sz, 1.f);
-        }
-
-        if (cfg::esp::distance) {
-            ddist(Distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
-        }
-    }
-    static long long frame_log = 0;
-    if (diag::every(frame_log, 5000)) {
-        diag::log(projected ? "INFO" : "WARN",
-                  "ESP frame players=%zu local=0x%llx team=%d pos=(%.2f %.2f %.2f) enemies=%d positioned=%d alive=%d projected=%d camera=0x%llx",
-                  Players.size(), (unsigned long long)LocalPlayer, LocalTeam,
-                  LocalPosition.x, LocalPosition.y, LocalPosition.z, enemies, positioned, alive,
-                  projected, (unsigned long long)g_camera);
     }
 }
 
-void visuals::dbox(const ImVec2& t, const ImVec2& b, float a) {
-    if (a < 0.01f) return;
+static void update_positions() {
+    for (int i = 0; i < g_pf_count; i++) {
+        PlayerFrame& pf = g_pf[i];
+        if (!pf.object || !ptr_ok(pf.object, 0x10)) continue;
 
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        void* klass_ptr;
+        __builtin_memcpy(&klass_ptr, pf.object, 8);
+        if (klass_ptr != g_pi.klass) { pf.hp = 0; continue; }
 
-    float x1 = t.x, y1 = t.y, x2 = b.x, y2 = b.y;
-    float r = cfg::esp::box_rounding;
+        __builtin_memcpy(&pf.hp, (uint8_t*)pf.object + g_pi.off_hp, 4);
+        if (pf.hp <= 0) continue;
 
-    ImU32 col = IM_COL32(
-        static_cast<int>(cfg::esp::box_col.x * 255),
-        static_cast<int>(cfg::esp::box_col.y * 255),
-        static_cast<int>(cfg::esp::box_col.z * 255),
-        static_cast<int>(cfg::esp::box_col.w * 255 * a)
-    );
+        void* transform = api.get_transform(pf.object);
+        if (!transform) continue;
+
+        Vec3 pos{};
+        api.get_position(transform, &pos);
+        if (isfinite(pos.x) && isfinite(pos.y) && isfinite(pos.z))
+            pf.pos = pos;
+
+        float dx = pf.pos.x - g_local_pos.x;
+        float dy = pf.pos.y - g_local_pos.y;
+        float dz = pf.pos.z - g_local_pos.z;
+        pf.dist = sqrtf(dx*dx + dy*dy + dz*dz);
+    }
+}
+
+// ===================================================================
+// Drawing helpers
+// ===================================================================
+static void draw_text_outlined(ImDrawList* dl, ImFont* font, float sz,
+                               const ImVec2& pos, ImU32 col, const char* text) {
+    if (!font || !text || !*text) return;
+    const ImU32 shadow = IM_COL32(0, 0, 0, (col >> 24) & 0xFF);
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            if (dx || dy)
+                dl->AddText(font, sz, ImVec2(pos.x + dx, pos.y + dy), shadow, text);
+    dl->AddText(font, sz, pos, col, text);
+}
+
+static ImU32 iv4(const ImVec4& c, float a = 1.f) {
+    return IM_COL32((int)(c.x*255), (int)(c.y*255), (int)(c.z*255), (int)(c.w*a*255));
+}
+
+static void draw_esp_box(ImDrawList* dl, const ImVec2& top, const ImVec2& bot, float alpha) {
+    if (!cfg::esp::box) return;
+    ImU32 col = iv4(cfg::esp::box_col, alpha);
+    float w = (bot.x - top.x) * 0.5f;
+    ImVec2 tl(top.x - w, top.y);
+    ImVec2 br(top.x + w, bot.y);
 
     if (cfg::esp::box_type == 0) {
-        dl->AddRect(ImVec2(x1 + 2.f, y1 + 2.f), ImVec2(x2 + 2.f, y2 + 2.f), IM_COL32(0, 0, 0, (int)(100 * a)), r, 0, 2.f);
-        dl->AddRect(ImVec2(x1 - 1.f, y1 - 1.f), ImVec2(x2 + 1.f, y2 + 1.f), IM_COL32(0, 0, 0, (int)(180 * a)), r, 0, 1.f);
-        dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), col, r, 0, 1.f);
+        dl->AddRect(tl, br, col, cfg::esp::box_rounding, 0, 1.5f);
     } else {
-        float w = x2 - x1, h = y2 - y1;
-        float sz = std::min(w, h) * 0.25f;
-        float cr = std::min(r, sz * 0.5f);
-
-        ImU32 s1 = IM_COL32(0, 0, 0, (int)(100 * a));
-        ImU32 s2 = IM_COL32(0, 0, 0, (int)(180 * a));
-
-        auto corner = [&](float cx, float cy, float dx, float dy) {
-            if (cr > 0.5f) {
-                float arc_cx = cx + dx * cr;
-                float arc_cy = cy + dy * cr;
-
-                float angle_start, angle_end;
-                if (dx > 0 && dy > 0) { angle_start = 3.14159265f; angle_end = 4.71238898f; }
-                else if (dx < 0 && dy > 0) { angle_start = 4.71238898f; angle_end = 6.28318530f; }
-                else if (dx > 0 && dy < 0) { angle_start = 1.57079632f; angle_end = 3.14159265f; }
-                else { angle_start = 0.f; angle_end = 1.57079632f; }
-
-                dl->PathArcTo(ImVec2(arc_cx + 2.f * (dx > 0 ? 1 : -1), arc_cy + 2.f * (dy > 0 ? 1 : -1)), cr, angle_start, angle_end, 8);
-                dl->PathStroke(s1, 0, 2.f);
-                dl->AddLine(ImVec2(cx + dx * cr, cy + 2.f * (dy > 0 ? 1 : -1)), ImVec2(cx + dx * sz, cy + 2.f * (dy > 0 ? 1 : -1)), s1, 2.f);
-                dl->AddLine(ImVec2(cx + 2.f * (dx > 0 ? 1 : -1), cy + dy * cr), ImVec2(cx + 2.f * (dx > 0 ? 1 : -1), cy + dy * sz), s1, 2.f);
-
-                dl->PathArcTo(ImVec2(arc_cx, arc_cy), cr, angle_start, angle_end, 8);
-                dl->PathStroke(s2, 0, 1.f);
-                dl->AddLine(ImVec2(cx + dx * cr, cy), ImVec2(cx + dx * sz, cy), s2, 1.f);
-                dl->AddLine(ImVec2(cx, cy + dy * cr), ImVec2(cx, cy + dy * sz), s2, 1.f);
-
-                dl->PathArcTo(ImVec2(arc_cx, arc_cy), cr, angle_start, angle_end, 8);
-                dl->PathStroke(col, 0, 1.f);
-                dl->AddLine(ImVec2(cx + dx * cr, cy), ImVec2(cx + dx * sz, cy), col, 1.f);
-                dl->AddLine(ImVec2(cx, cy + dy * cr), ImVec2(cx, cy + dy * sz), col, 1.f);
-            } else {
-                dl->AddLine(ImVec2(cx + 2.f * (dx > 0 ? 1 : -1), cy + 2.f * (dy > 0 ? 1 : -1)), ImVec2(cx + dx * sz + 2.f * (dx > 0 ? 1 : -1), cy + 2.f * (dy > 0 ? 1 : -1)), s1, 2.f);
-                dl->AddLine(ImVec2(cx + 2.f * (dx > 0 ? 1 : -1), cy + 2.f * (dy > 0 ? 1 : -1)), ImVec2(cx + 2.f * (dx > 0 ? 1 : -1), cy + dy * sz + 2.f * (dy > 0 ? 1 : -1)), s1, 2.f);
-
-                dl->AddLine(ImVec2(cx, cy), ImVec2(cx + dx * sz, cy), s2, 1.f);
-                dl->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + dy * sz), s2, 1.f);
-
-                dl->AddLine(ImVec2(cx, cy), ImVec2(cx + dx * sz, cy), col, 1.f);
-                dl->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + dy * sz), col, 1.f);
-            }
-        };
-
-        corner(x1, y1, 1, 1);
-        corner(x2, y1, -1, 1);
-        corner(x1, y2, 1, -1);
-        corner(x2, y2, -1, -1);
+        float clen = (br.y - tl.y) * 0.25f;
+        dl->AddLine({tl.x, tl.y}, {tl.x + clen, tl.y}, col, 1.5f);
+        dl->AddLine({tl.x, tl.y}, {tl.x, tl.y + clen}, col, 1.5f);
+        dl->AddLine({br.x, tl.y}, {br.x - clen, tl.y}, col, 1.5f);
+        dl->AddLine({br.x, tl.y}, {br.x, tl.y + clen}, col, 1.5f);
+        dl->AddLine({tl.x, br.y}, {tl.x + clen, br.y}, col, 1.5f);
+        dl->AddLine({tl.x, br.y}, {tl.x, br.y - clen}, col, 1.5f);
+        dl->AddLine({br.x, br.y}, {br.x - clen, br.y}, col, 1.5f);
+        dl->AddLine({br.x, br.y}, {br.x, br.y - clen}, col, 1.5f);
     }
 }
 
-void visuals::dhp(int hp, const ImVec2& t, const ImVec2& b, float box_h, float a) {
-    if (a < 0.01f) return;
+static void draw_healthbar(ImDrawList* dl, int hp, const ImVec2& top, const ImVec2& bot,
+                            float alpha) {
+    if (!cfg::esp::health) return;
+    float w = (bot.x - top.x) * 0.5f;
+    float box_h = bot.y - top.y;
+    if (box_h < 10.f) return;
 
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    float bar_w = 3.f;
+    float x = top.x - w - bar_w - 2.f;
+    float frac = (float)hp / 100.f;
+    if (frac > 1.f) frac = 1.f;
+    if (frac < 0.f) frac = 0.f;
+    float bar_h = box_h * frac;
 
-    hp = std::clamp(hp, 0, 100);
-    float pct = hp / 100.f;
+    dl->AddRectFilled({x, top.y}, {x + bar_w, top.y + box_h},
+                      IM_COL32(0, 0, 0, (int)(180 * alpha)));
+    dl->AddRectFilled({x, top.y + box_h - bar_h}, {x + bar_w, top.y + box_h},
+                      iv4(cfg::esp::health_col, alpha));
 
-    float bx = roundf(t.x - 6.f);
-    float bw = 3.f;
-    float bh = roundf(b.y - t.y);
-    float fh = bh * pct;
-
-    float top_y = t.y;
-    float bot_y = b.y;
-    float fill_top = roundf(bot_y - fh);
-
-    dl->AddRectFilled(ImVec2(bx - 2.f, top_y - 2.f), ImVec2(bx + bw + 2.f, bot_y + 2.f), IM_COL32(0, 0, 0, (int)(120 * a)), 1.f);
-    dl->AddRectFilled(ImVec2(bx - 1.f, top_y - 1.f), ImVec2(bx + bw + 1.f, bot_y + 1.f), IM_COL32(0, 0, 0, (int)(200 * a)), 0.f);
-    dl->AddRect(ImVec2(bx - 1.f, top_y - 1.f), ImVec2(bx + bw + 1.f, bot_y + 1.f), IM_COL32(30, 30, 30, (int)(255 * a)), 0, 0, 1.f);
-
-    ImU32 col_top = IM_COL32(
-        static_cast<int>(cfg::esp::health_col.x * 255),
-        static_cast<int>(cfg::esp::health_col.y * 255),
-        static_cast<int>(cfg::esp::health_col.z * 255),
-        static_cast<int>(cfg::esp::health_col.w * 255 * a)
-    );
-    ImU32 col_bot = IM_COL32(
-        static_cast<int>(cfg::esp::health_col.x * 180),
-        static_cast<int>(cfg::esp::health_col.y * 180),
-        static_cast<int>(cfg::esp::health_col.z * 180),
-        static_cast<int>(cfg::esp::health_col.w * 255 * a)
-    );
-
-    if (fh > 1.f) {
-        dl->AddRectFilledMultiColor(ImVec2(bx, fill_top), ImVec2(bx + bw, bot_y), col_top, col_top, col_bot, col_bot);
-    }
-
-    if (hp < 100 && espFont && bh > 20.f) {
+    if (hp < 100 && espFont && box_h > 25.f) {
         char txt[8];
         snprintf(txt, sizeof(txt), "%d", hp);
-        float fs = 10.f;
-        ImVec2 ts = espFont->CalcTextSizeA(fs, FLT_MAX, 0.f, txt);
-        float tx = roundf(bx + (bw - ts.x) * 0.5f);
-        float ty = roundf(fill_top - ts.y * 0.5f);
-        if (ty < top_y) ty = top_y;
-        if (ty + ts.y > bot_y) ty = bot_y - ts.y;
-        draw_text_outlined(dl, espFont, fs, ImVec2(tx, ty), IM_COL32(255, 255, 255, (int)(255 * a)), txt);
+        float fs = box_h * 0.12f;
+        if (fs < 8.f) fs = 8.f;
+        if (fs > 14.f) fs = 14.f;
+        ImVec2 ts = espFont->CalcTextSizeA(fs, 1e9f, 0.f, txt);
+        float tx = x + (bar_w - ts.x) * 0.5f;
+        float ty = top.y + box_h - bar_h - ts.y - 2.f;
+        draw_text_outlined(dl, espFont, fs, {tx, ty},
+                           IM_COL32(255, 255, 255, (int)(255 * alpha)), txt);
     }
 }
 
-void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz, float a) {
-    if (!espFont || a < 0.01f || !name) return;
-
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-
-    ImVec2 ts = espFont->CalcTextSizeA(sz, FLT_MAX, 0.f, name);
-    ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(box_max.y + 4.f));
-
-    ImU32 col = IM_COL32(
-        static_cast<int>(cfg::esp::name_col.x * 255),
-        static_cast<int>(cfg::esp::name_col.y * 255),
-        static_cast<int>(cfg::esp::name_col.z * 255),
-        static_cast<int>(cfg::esp::name_col.w * 255 * a)
-    );
-    draw_text_outlined(dl, espFont, sz, tp, col, name);
+static void draw_nickname(ImDrawList* dl, const char* nick, float cx, float top_y,
+                           float sz, float alpha) {
+    if (!cfg::esp::name || !espFont || !nick || !*nick) return;
+    ImVec2 ts = espFont->CalcTextSizeA(sz, 1e9f, 0.f, nick);
+    draw_text_outlined(dl, espFont, sz, {cx - ts.x * 0.5f, top_y - ts.y - 2.f},
+                       iv4(cfg::esp::name_col, alpha), nick);
 }
 
-void visuals::ddist(float dist, float x, float y, float sz, float a) {
-    if (!espFont || a < 0.01f) return;
-
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-
-    char txt[16];
-    snprintf(txt, sizeof(txt), "%dm", static_cast<int>(dist));
-
-    ImVec2 tp(roundf(x + 5.f), roundf(y));
-
-    ImU32 col = IM_COL32(
-        static_cast<int>(cfg::esp::distance_col.x * 255),
-        static_cast<int>(cfg::esp::distance_col.y * 255),
-        static_cast<int>(cfg::esp::distance_col.z * 255),
-        static_cast<int>(cfg::esp::distance_col.w * 255 * a)
-    );
-    draw_text_outlined(dl, espFont, sz, tp, col, txt);
+static void draw_distance(ImDrawList* dl, float dist, float cx, float bot_y,
+                            float sz, float alpha) {
+    if (!cfg::esp::distance || !espFont) return;
+    char txt[32];
+    snprintf(txt, sizeof(txt), "%.0fm", dist);
+    ImVec2 ts = espFont->CalcTextSizeA(sz, 1e9f, 0.f, txt);
+    draw_text_outlined(dl, espFont, sz, {cx - ts.x * 0.5f, bot_y + 2.f},
+                       iv4(cfg::esp::distance_col, alpha), txt);
 }
 
-void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {
-    if (!font || !dl) return;
+// ===================================================================
+// Main entry: visuals::draw()
+// ===================================================================
+enum Stage { ST_API, ST_ICALL, ST_DISCOVER, ST_ACTIVE };
 
-    int a = (color >> IM_COL32_A_SHIFT) & 0xFF;
-    int s1 = static_cast<int>(a * 0.4f);
-    int s2 = static_cast<int>(a * 0.7f);
+static Stage g_stage = ST_API;
+static int   g_retry_cd = 0;
 
-    dl->AddText(font, size, ImVec2(pos.x + 2.f, pos.y + 2.f), IM_COL32(0, 0, 0, s1), text);
-    dl->AddText(font, size, ImVec2(pos.x + 1.f, pos.y + 1.f), IM_COL32(0, 0, 0, s2), text);
-    dl->AddText(font, size, pos, color, text);
+void visuals::draw() {
+    g_frame++;
+
+    if (g_retry_cd > 0) { g_retry_cd--; return; }
+
+    switch (g_stage) {
+    case ST_API:
+        if (!resolve_api()) { g_retry_cd = 60; return; }
+        g_stage = ST_ICALL;
+        // fall through
+    case ST_ICALL:
+        if (!resolve_icalls()) { g_retry_cd = 120; return; }
+        g_stage = ST_DISCOVER;
+        // fall through
+    case ST_DISCOVER:
+        if (!discover_player_class()) { g_retry_cd = 300; return; }
+        g_stage = ST_ACTIVE;
+        ESPLOG("ESP active");
+        break;
+    case ST_ACTIVE:
+        break;
+    }
+
+    float sw = g_sw;
+    float sh = g_sh;
+    if (sw < 100.f || sh < 100.f) return;
+
+    g_vp_ok = get_camera_vp();
+    if (!g_vp_ok) return;
+
+    // Full refresh every ~1.5s, position-only update every frame
+    if (g_frame % 90 == 0 || g_pf_count == 0)
+        refresh_players();
+    else
+        update_positions();
+
+    if (g_pf_count == 0) return;
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (!dl) return;
+
+    for (int i = 0; i < g_pf_count; i++) {
+        const PlayerFrame& pf = g_pf[i];
+        if (pf.hp <= 0) continue;
+        if (pf.team == g_local_team) continue;
+
+        ImVec2 feet_s, head_s;
+        if (!w2s(g_vp, pf.pos, sw, sh, feet_s)) continue;
+
+        Vec3 head = { pf.pos.x, pf.pos.y + 1.7f, pf.pos.z };
+        if (!w2s(g_vp, head, sw, sh, head_s)) continue;
+
+        if (head_s.x < -200 || head_s.x > sw + 200) continue;
+        if (head_s.y < -200 || head_s.y > sh + 200) continue;
+
+        float box_h = feet_s.y - head_s.y;
+        if (box_h < 5.f) continue;
+
+        float alpha = 1.f;
+        if (pf.dist > 150.f) alpha = 0.5f;
+        if (pf.dist > 300.f) alpha = 0.3f;
+
+        ImVec2 top_pt(head_s.x, head_s.y);
+        ImVec2 bot_pt(feet_s.x, feet_s.y);
+
+        float fsz = box_h * 0.14f;
+        if (fsz < 9.f)  fsz = 9.f;
+        if (fsz > 16.f) fsz = 16.f;
+
+        draw_esp_box(dl, top_pt, bot_pt, alpha);
+        draw_healthbar(dl, pf.hp, top_pt, bot_pt, alpha);
+        draw_nickname(dl, pf.nick, top_pt.x, top_pt.y, fsz, alpha);
+        draw_distance(dl, pf.dist, top_pt.x, bot_pt.y, fsz, alpha);
+    }
 }

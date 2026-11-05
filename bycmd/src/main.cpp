@@ -126,11 +126,7 @@ int main() {
                 ui::menu::render();
             }
 
-            if (run && proc::lib != 0) {
-                // Library health is independent from asynchronous registry discovery.
-                game::check_lib(proc::lib);
-                visuals::draw();
-            }
+            visuals::draw();
         }
 
         bool vis = ui::bar::g_open;

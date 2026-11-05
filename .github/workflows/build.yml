@@ -2,7 +2,7 @@ name: Build bycmd ARM64
 
 on:
   push:
-    branches: [ "main", "claude/*" ]
+    branches: [ "main", "claude/*", "build/*" ]
   workflow_dispatch:
 
 jobs:

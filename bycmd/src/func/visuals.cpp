@@ -97,15 +97,84 @@ void visuals::draw() {
         frame_enemies.push_back({Player, PlayerPosition, Health, Distance});
     }
 
-    // Do not trust the first camera-shaped native object. Unity keeps scene,
-    // UI, preview and stale Camera instances alive together. Score every
-    // validated candidate against the live player coordinates and select the
-    // one whose view/projection pair actually places bodies on this display.
     std::vector<camera_candidate> Cameras = camera_candidates(LocalPlayer);
-    // In 1.0.0 the gameplay Camera is no longer reachable through the
-    // Transform/GameObject component list. The local ios controller still
-    // owns the live camera transforms, so build a view matrix from their
-    // hierarchy instead of falling back to a multi-gigabyte heap scan.
+
+    // Static camera pointer probe (Gemini approach): try reading the main
+    // Camera from a known static address in libil2cpp.so, then scan it for
+    // real V/P matrices via detect_pair. If it works, this camera gets the
+    // +200 score bonus (view_off >= 0) and eliminates displacement.
+    {
+        static uint64_t s_static_cam = 0;
+        static long long s_static_ts = 0;
+        const long long now_ms = diag::now_ms();
+        if (now_ms - s_static_ts > 2000) {
+            s_static_ts = now_ms;
+            s_static_cam = 0;
+            constexpr uint64_t kCameraMain = 0x6BE9604;
+            uint64_t raw = rpm<uint64_t>(proc::lib + kCameraMain);
+            // Try multiple dereference depths: the static slot might point
+            // to a managed object (ptr → native at +0x10) or directly to
+            // a native Camera.
+            uint64_t tries[4] = { raw, 0, 0, 0 };
+            if (plausible(raw)) {
+                tries[1] = rpm<uint64_t>(raw + 0x10); // managed → native
+                tries[2] = rpm<uint64_t>(raw + 0x08); // alternate header
+                tries[3] = rpm<uint64_t>(raw + 0x20); // deeper wrapper
+            }
+            for (int t = 0; t < 4; ++t) {
+                uint64_t cam = tries[t];
+                if (!plausible(cam)) continue;
+                camera_candidate cc;
+                cc.address = cam;
+                if (detect_pair(cam, cc.view, cc.projection, cc.view_off, cc.proj_off, "static")) {
+                    Cameras.push_back(cc);
+                    s_static_cam = cam;
+                    static long long slog = 0;
+                    if (diag::every(slog, 5000))
+                        diag::log("CAMERA", "static_ptr depth=%d cam=0x%llx voff=+0x%x poff=+0x%x",
+                                  t, (unsigned long long)cam, cc.view_off, cc.proj_off);
+                    break;
+                }
+                // Also try validate_camera (hardcoded 0x70/0xB0)
+                matrix v{}, p{};
+                if (validate_camera(cam, v, p)) {
+                    cc.view = v;
+                    cc.projection = p;
+                    cc.view_off = int(v100::camera_view);
+                    cc.proj_off = int(v100::camera_projection);
+                    Cameras.push_back(cc);
+                    s_static_cam = cam;
+                    static long long slog2 = 0;
+                    if (diag::every(slog2, 5000))
+                        diag::log("CAMERA", "static_ptr(validate) depth=%d cam=0x%llx",
+                                  t, (unsigned long long)cam);
+                    break;
+                }
+            }
+            if (!s_static_cam) {
+                static long long flog = 0;
+                if (diag::every(flog, 10000))
+                    diag::log("CAMERA", "static_ptr MISS raw=0x%llx (no valid matrices at any depth)",
+                              (unsigned long long)raw);
+            }
+        } else if (s_static_cam) {
+            // Fast path: re-read cached static camera (2 rpm reads)
+            camera_candidate cc;
+            cc.address = s_static_cam;
+            if (detect_pair(s_static_cam, cc.view, cc.projection, cc.view_off, cc.proj_off, "static_cached")) {
+                Cameras.push_back(cc);
+            } else {
+                matrix v{}, p{};
+                if (validate_camera(s_static_cam, v, p)) {
+                    cc.view = v; cc.projection = p;
+                    cc.view_off = int(v100::camera_view);
+                    cc.proj_off = int(v100::camera_projection);
+                    Cameras.push_back(cc);
+                }
+            }
+        }
+    }
+
     std::vector<camera_candidate> TransformCameras =
         player::camera_fallback_candidates(LocalPlayer);
     Cameras.insert(Cameras.end(), TransformCameras.begin(), TransformCameras.end());

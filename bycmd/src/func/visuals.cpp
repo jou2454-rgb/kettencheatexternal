@@ -203,29 +203,46 @@ void visuals::draw() {
             }
         } else if (need_resolve) {
             s_il2cpp_resolve = now_ms;
-            uint64_t native = 0;
-            matrix v{}, p{};
-            if (main_camera_matrices(LocalPlayer, native, v, p)) {
-                s_il2cpp_native = native;
-                s_il2cpp_voff = g_main_cam.view_off;
-                s_il2cpp_poff = g_main_cam.proj_off;
-                camera_candidate cc;
-                cc.address = native;
-                cc.view = v; cc.projection = p;
-                cc.view_off = s_il2cpp_voff;
-                cc.proj_off = s_il2cpp_poff;
-                Cameras.push_back(cc);
-                float fov = detect_fov(native);
-                if (fov > 0.f) {
-                    s_detected_fov = fov;
-                    static long long fov_log = 0;
-                    if (diag::every(fov_log, 10000))
-                        diag::log("CAMERA", "il2cpp FOV detected: %.1f°", fov);
+            static bool s_il2cpp_disabled = false;
+            static int s_il2cpp_slow_count = 0;
+            if (!s_il2cpp_disabled) {
+                long long t0 = diag::now_ms();
+                uint64_t native = 0;
+                matrix v{}, p{};
+                bool found = main_camera_matrices(LocalPlayer, native, v, p);
+                long long elapsed = diag::now_ms() - t0;
+                if (elapsed > 100) {
+                    ++s_il2cpp_slow_count;
+                    diag::log("CAMERA", "il2cpp scan took %lldms (slow #%d)", elapsed, s_il2cpp_slow_count);
+                    if (s_il2cpp_slow_count >= 3) {
+                        s_il2cpp_disabled = true;
+                        diag::log("CAMERA", "il2cpp scan DISABLED (too slow, 3+ hits >100ms)");
+                    }
+                } else {
+                    s_il2cpp_slow_count = 0;
                 }
-                static long long il2cpp_log = 0;
-                if (diag::every(il2cpp_log, 5000))
-                    diag::log("CAMERA", "il2cpp cam native=0x%llx voff=+0x%x poff=+0x%x fov=%.1f",
-                              (unsigned long long)native, s_il2cpp_voff, s_il2cpp_poff, s_detected_fov);
+                if (found) {
+                    s_il2cpp_native = native;
+                    s_il2cpp_voff = g_main_cam.view_off;
+                    s_il2cpp_poff = g_main_cam.proj_off;
+                    camera_candidate cc;
+                    cc.address = native;
+                    cc.view = v; cc.projection = p;
+                    cc.view_off = s_il2cpp_voff;
+                    cc.proj_off = s_il2cpp_poff;
+                    Cameras.push_back(cc);
+                    float fov = detect_fov(native);
+                    if (fov > 0.f) {
+                        s_detected_fov = fov;
+                        static long long fov_log = 0;
+                        if (diag::every(fov_log, 10000))
+                            diag::log("CAMERA", "il2cpp FOV detected: %.1f°", fov);
+                    }
+                    static long long il2cpp_log = 0;
+                    if (diag::every(il2cpp_log, 5000))
+                        diag::log("CAMERA", "il2cpp cam native=0x%llx voff=+0x%x poff=+0x%x fov=%.1f elapsed=%lldms",
+                                  (unsigned long long)native, s_il2cpp_voff, s_il2cpp_poff, s_detected_fov, elapsed);
+                }
             }
         }
         // Pass detected FOV to Transform fallback cameras

@@ -18,77 +18,93 @@
 
 extern ImFont* espFont;
 
-// ---- Cached camera: address + hardcoded offsets ----
+// ---- Cached camera: address + detect_pair offsets ----
 static uint64_t s_cam_addr = 0;
+static int s_cam_voff = -1;
+static int s_cam_poff = -1;
 static long long s_cam_resolved = 0;
 
-static bool read_camera_matrices(uint64_t native_cam, matrix& view, matrix& proj) {
-    if (!native_cam) return false;
-    if (!mem_read(native_cam + v100::camera_view, &view, sizeof(view))) return false;
-    if (!mem_read(native_cam + v100::camera_projection, &proj, sizeof(proj))) return false;
-    if (!finite_matrix(view) || !finite_matrix(proj)) return false;
+static bool read_cached_matrices(matrix& view, matrix& proj) {
+    if (!s_cam_addr || s_cam_voff < 0) return false;
+    if (!mem_read(s_cam_addr + uint64_t(s_cam_voff), &view, sizeof(view))) return false;
+    if (!mem_read(s_cam_addr + uint64_t(s_cam_poff), &proj, sizeof(proj))) return false;
     const float* v = reinterpret_cast<const float*>(&view);
     const float* p = reinterpret_cast<const float*>(&proj);
-    if (std::fabs(v[3]) > 0.01f || std::fabs(v[7]) > 0.01f ||
-        std::fabs(v[15] - 1.f) > 0.05f) return false;
-    if (std::fabs(p[0]) < 0.001f || std::fabs(p[5]) < 0.001f) return false;
-    return true;
+    return matrix_window_sane(v, true) && matrix_window_sane(p, false);
 }
 
 static bool resolve_camera(uint64_t local_player, const Vector3& local_pos,
                            matrix& out_view, matrix& out_proj) {
     const long long now = diag::now_ms();
 
-    // Fast path: cached camera, just re-read matrices (2 rpm calls)
-    if (s_cam_addr && (now - s_cam_resolved < 3000)) {
-        if (read_camera_matrices(s_cam_addr, out_view, out_proj)) {
+    // Fast path: cached camera + offsets from detect_pair (2 rpm reads)
+    if (s_cam_addr && s_cam_voff >= 0 && (now - s_cam_resolved < 3000)) {
+        if (read_cached_matrices(out_view, out_proj)) {
             g_camera = s_cam_addr;
             return true;
         }
         s_cam_addr = 0;
+        s_cam_voff = s_cam_poff = -1;
     }
 
-    // Slow path: find camera through camera_candidates() (runs every ~3s)
+    // Slow path: camera_candidates() with detect_pair
+    // Only use cameras where detect_pair found real V/P (view_off >= 0)
+    // NO Transform fallback = NO displacement
     std::vector<camera_candidate> cams = camera_candidates(local_player);
 
-    // Pick best camera: closest to local player, validated by hardcoded offsets
     float best_dist = 1e9f;
-    uint64_t best_addr = 0;
+    const camera_candidate* best = nullptr;
 
     for (const auto& c : cams) {
-        matrix v{}, p{};
-        if (!read_camera_matrices(c.address, v, p)) continue;
+        if (c.view_off < 0) continue;  // skip Transform-built, only real matrices
 
-        // Extract camera position from view matrix
-        const float* vf = reinterpret_cast<const float*>(&v);
+        const float* vf = reinterpret_cast<const float*>(&c.view);
         const Vector3 cam_pos(
             -(vf[0]*vf[12] + vf[1]*vf[13] + vf[2]*vf[14]),
             -(vf[4]*vf[12] + vf[5]*vf[13] + vf[6]*vf[14]),
             -(vf[8]*vf[12] + vf[9]*vf[13] + vf[10]*vf[14]));
         float d = calculate_distance(cam_pos, local_pos);
 
-        if (d < best_dist) {
-            best_dist = d;
-            best_addr = c.address;
-            out_view = v;
-            out_proj = p;
-        }
+        if (d < best_dist) { best_dist = d; best = &c; }
     }
 
-    if (best_addr && best_dist < 50.f) {
-        s_cam_addr = best_addr;
+    if (best && best_dist < 50.f) {
+        s_cam_addr = best->address;
+        s_cam_voff = best->view_off;
+        s_cam_poff = best->proj_off;
         s_cam_resolved = now;
-        g_camera = best_addr;
+        out_view = best->view;
+        out_proj = best->projection;
+        g_camera = best->address;
         static long long log_t = 0;
         if (diag::every(log_t, 5000))
-            diag::log("CAMERA", "resolved cam=0x%llx dist=%.1f candidates=%zu",
-                      (unsigned long long)best_addr, best_dist, cams.size());
+            diag::log("CAMERA", "detect_pair cam=0x%llx voff=+0x%x poff=+0x%x dist=%.1f",
+                      (unsigned long long)best->address, best->view_off, best->proj_off, best_dist);
         return true;
     }
 
+    // Last resort: any camera that passes validate_camera (hardcoded 0x70/0xB0)
+    for (const auto& c : cams) {
+        if (c.view_off >= 0) continue; // already tried above
+        matrix v{}, p{};
+        if (validate_camera(c.address, v, p)) {
+            s_cam_addr = c.address;
+            s_cam_voff = int(v100::camera_view);
+            s_cam_poff = int(v100::camera_projection);
+            s_cam_resolved = now;
+            out_view = v;
+            out_proj = p;
+            g_camera = c.address;
+            static long long log_t2 = 0;
+            if (diag::every(log_t2, 5000))
+                diag::log("CAMERA", "validate_camera cam=0x%llx (hardcoded offsets)", (unsigned long long)c.address);
+            return true;
+        }
+    }
+
     static long long fail_log = 0;
-    if (diag::every(fail_log, 5000))
-        diag::log("CAMERA", "NO valid camera found, candidates=%zu", cams.size());
+    if (diag::every(fail_log, 3000))
+        diag::log("CAMERA", "NO camera found, total_candidates=%zu", cams.size());
     return false;
 }
 

@@ -252,13 +252,8 @@ namespace player {
                 std::fabs(raw.position.z) > 100000.f) continue;
             Vector4 rotation = euler_to_quaternion(raw.euler);
             if (!normalize_quaternion(rotation)) continue;
-            float fov = 60.f;
-            const float f0 = rpm<float>(state + 0x48);
-            const float f1 = rpm<float>(state + 0x4C);
-            if (f0 >= 20.f && f0 <= 120.f) fov = f0;
-            else if (f1 >= 20.f && f1 <= 120.f) fov = f1;
             result.push_back({state, view_from_pose(raw.position, rotation),
-                              perspective(fov, g_sw / std::max(g_sh, 1.f)), -1, -1});
+                              perspective(60.f, g_sw / std::max(g_sh, 1.f)), -1, -1});
             static long long last_state_log = 0;
             if (diag::every(last_state_log, 5000))
                 diag::log("CAMERA", "state bor=0x%llx pos=(%.2f %.2f %.2f) euler=(%.1f %.1f %.1f) fov=%.1f",
@@ -289,14 +284,6 @@ namespace player {
         const uint64_t controller = find_player_component(local_player, ios_class);
         if (!controller) return result;
 
-        // Use bor state FOV if available, otherwise default to 60
-        float fallback_fov = 60.f;
-        if (!result.empty()) {
-            const float* p = reinterpret_cast<const float*>(&result.front().projection);
-            if (std::fabs(p[5]) > .001f)
-                fallback_fov = 2.f * std::atan(1.f / p[5]) * (180.f / 3.14159265f);
-        }
-
         const uint64_t aim_state = rpm<uint64_t>(controller + 0x38);
         Vector4 view_rotation = aim_state ? rpm<Vector4>(aim_state + 0x10) : Vector4{};
         Vector4 yaw = aim_state ? rpm<Vector4>(aim_state + 0x20) : Vector4{};
@@ -324,7 +311,7 @@ namespace player {
             if (!normalize_quaternion(rotation)) continue;
             forward_y = rotate(rotation, Vector3(0.f, 0.f, 1.f)).y;
             result.push_back({native, view_from_pose(position, rotation),
-                              perspective(fallback_fov, g_sw / std::max(g_sh, 1.f)), -1, -1});
+                              perspective(60.f, g_sw / std::max(g_sh, 1.f)), -1, -1});
             selected_offset = offset;
             break;
         }
@@ -337,7 +324,7 @@ namespace player {
                       (unsigned long long)aim_state, view_rotation.x, view_rotation.y,
                       view_rotation.z, view_rotation.w, yaw.x, yaw.y, yaw.z, yaw.w,
                       yaw_valid ? 1 : 0,
-                      forward_y, fallback_fov, g_sw / std::max(g_sh, 1.f));
+                      forward_y, 60.f, g_sw / std::max(g_sh, 1.f));
         return result;
     }
 

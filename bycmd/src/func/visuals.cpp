@@ -49,19 +49,14 @@ void visuals::draw() {
         }
     }
     static long long object_log = 0;
-    if (diag::every(object_log, 10000)) {
-        for (size_t i = 0; i < Players.size(); ++i) {
+    if (diag::every(object_log, 30000)) {
+        for (size_t i = 0; i < std::min(Players.size(), size_t(5)); ++i) {
             const uint64_t object = Players[i];
-            const player::PlayerPose shape = player::pose(object);
-            const Vector3 position = shape.feet;
-            std::string name_text = name_cache[object].name;
-            if (name_text.empty()) name_text = "<name unavailable>";
-            diag::log("PLAYER", "[%zu] object=0x%llx id=%u name=%s local=%d team=%d hp=%d pos=(%.3f %.3f %.3f) head=(%.3f %.3f %.3f) body=%.2f",
+            const std::string& name_text = name_cache[object].name;
+            diag::log("PLAYER", "[%zu] object=0x%llx id=%u name=%s local=%d team=%d",
                       i, (unsigned long long)object, rpm<uint32_t>(object + v100::net_object_id),
-                      name_text.c_str(), player::local(object) ? 1 : 0, player::team(object),
-                      player::health(object), position.x, position.y, position.z,
-                      shape.head.x, shape.head.y, shape.head.z,
-                      shape.head.y - shape.feet.y);
+                      name_text.empty() ? "?" : name_text.c_str(),
+                      player::local(object) ? 1 : 0, player::team(object));
         }
     }
     uint64_t LocalPlayer = 0;
@@ -80,6 +75,8 @@ void visuals::draw() {
         Vector3 position{};
         Vector3 head{};
         bool has_head{false};
+        int hp{100};
+        float distance{0.f};
     };
     std::vector<enemy_frame> frame_enemies;
     const long long now_ms = diag::now_ms();
@@ -96,14 +93,7 @@ void visuals::draw() {
 
         const player::HealthInfo Health = player::health_info(Player);
         const int hp_now = Health.valid ? Health.hp : -1;
-        const auto hp_prev = last_hp.find(Player);
-        if (hp_prev == last_hp.end() || hp_prev->second != hp_now) {
-            diag::log("HEALTH", "object=0x%llx hp=%d max=%d valid=%d stats=0x%llx",
-                      (unsigned long long)Player, Health.hp, Health.max_hp,
-                      Health.valid ? 1 : 0,
-                      (unsigned long long)rpm<uint64_t>(Player + v100::player_stats));
-            last_hp[Player] = hp_now;
-        }
+        last_hp[Player] = hp_now;
         if (!Health.valid || Health.hp <= 0) {
             dead_since[Player] = now_ms;
             continue;
@@ -120,7 +110,7 @@ void visuals::draw() {
         const float Distance = calculate_distance(Shape.feet, LocalPosition);
         if (Distance > 500.f) continue;
 
-        frame_enemies.push_back({Player, Shape.feet, Shape.head, Shape.has_head});
+        frame_enemies.push_back({Player, Shape.feet, Shape.head, Shape.has_head, Health.hp, Distance});
     }
 
     // Do not trust the first camera-shaped native object. Unity keeps scene,
@@ -269,25 +259,11 @@ void visuals::draw() {
     for (const auto& Enemy : frame_enemies) {
         const uint64_t Player = Enemy.object;
 
-        // Camera candidate scoring/discovery can take several milliseconds.
-        // Re-read the player pose here, after the camera is locked, so the
-        // box is drawn on the model's current position instead of a snapshot
-        // taken before the camera scan. This removes the "ESP catches up with
-        // the player" effect while walking.
-        const player::PlayerPose Shape = player::pose(Player);
-        if (!Shape.valid) continue;
-        const player::HealthInfo CurrentHealth = player::health_info(Player);
-        if (!CurrentHealth.valid || CurrentHealth.hp <= 0) {
-            dead_since[Player] = diag::now_ms();
-            continue;
-        }
-
-        const Vector3 PlayerPosition = Shape.feet;
-        const Vector3 HeadPosition = Shape.has_head
-            ? Shape.head
+        const Vector3 PlayerPosition = Enemy.position;
+        const Vector3 HeadPosition = Enemy.has_head
+            ? Enemy.head
             : PlayerPosition + Vector3(0.f, 1.67f, 0.f);
-        const float Distance = calculate_distance(PlayerPosition, LocalPosition);
-        if (Distance > 500.f) continue;
+        const float Distance = Enemy.distance;
 
         ImVec2 ScreenHead, ScreenFoot;
         bool HeadVisible = world_to_screen(HeadPosition, ViewMatrix, ProjectionMatrix, ScreenHead);
@@ -315,7 +291,7 @@ void visuals::draw() {
         }
 
         if (cfg::esp::health) {
-            dhp(CurrentHealth.hp, BoxMin, BoxMax, bh, 1.f);
+            dhp(Enemy.hp, BoxMin, BoxMax, bh, 1.f);
         }
 
         if (cfg::esp::name) {

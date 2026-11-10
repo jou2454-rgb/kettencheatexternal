@@ -146,7 +146,7 @@ int main() {
 
         bool vis = ui::bar::g_open;
         drawEnd();
-        usleep(vis ? 1500 : 4000);
+        usleep(vis ? 4000 : 8000);
     }
 
     shutdown();

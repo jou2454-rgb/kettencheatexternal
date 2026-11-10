@@ -256,9 +256,9 @@ namespace player {
                               perspective(60.f, g_sw / std::max(g_sh, 1.f)), -1, -1});
             static long long last_state_log = 0;
             if (diag::every(last_state_log, 5000))
-                diag::log("CAMERA", "state bor=0x%llx pos=(%.2f %.2f %.2f) euler=(%.1f %.1f %.1f) fov=%.1f",
+                diag::log("CAMERA", "state bor=0x%llx pos=(%.2f %.2f %.2f) euler=(%.1f %.1f %.1f) fov=60",
                           (unsigned long long)state, raw.position.x, raw.position.y, raw.position.z,
-                          raw.euler.x, raw.euler.y, raw.euler.z, fov);
+                          raw.euler.x, raw.euler.y, raw.euler.z);
         }
         return result;
     }

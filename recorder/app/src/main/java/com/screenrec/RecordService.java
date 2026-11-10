@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaRecorder;
@@ -14,7 +15,9 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Environment;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
+import android.widget.Toast;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -24,10 +27,13 @@ import java.util.Locale;
 public class RecordService extends Service {
 
     private static final String TAG = "ScreenRec";
-    private static final String CHANNEL_ID = "rec_channel";
+    private static final String CHANNEL_ID = "screenrec_channel";
     private static final int NOTIF_ID = 9001;
 
+    public static final String ACTION_STOP = "com.screenrec.STOP";
+
     private static volatile boolean sRunning = false;
+    private static long sStartTime = 0;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
@@ -35,6 +41,7 @@ public class RecordService extends Service {
     private String outputPath;
 
     public static boolean isRunning() { return sRunning; }
+    public static long getStartTime() { return sStartTime; }
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -52,7 +59,7 @@ public class RecordService extends Service {
             return START_NOT_STICKY;
         }
 
-        if (intent.getBooleanExtra("stop", false)) {
+        if (ACTION_STOP.equals(intent.getAction()) || intent.getBooleanExtra("stop", false)) {
             stopRecording();
             return START_NOT_STICKY;
         }
@@ -67,15 +74,36 @@ public class RecordService extends Service {
         int bitrate = intent.getIntExtra("bitrate", 8_000_000);
 
         if (code == -1 || data == null) {
+            Log.e(TAG, "Missing projection data");
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIF_ID, buildNotification());
+        // MUST call startForeground BEFORE getMediaProjection on Android 10+
+        Notification notif = buildNotification(true);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, notif,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } else {
+                startForeground(NOTIF_ID, notif);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "startForeground failed", e);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
 
         MediaProjectionManager mgr = (MediaProjectionManager)
                 getSystemService(MEDIA_PROJECTION_SERVICE);
-        projection = mgr.getMediaProjection(code, data);
+
+        try {
+            projection = mgr.getMediaProjection(code, data);
+        } catch (Exception e) {
+            Log.e(TAG, "getMediaProjection failed", e);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
 
         if (projection == null) {
             Log.e(TAG, "MediaProjection is null");
@@ -86,16 +114,23 @@ public class RecordService extends Service {
         projection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
+                Log.i(TAG, "MediaProjection stopped by system");
                 stopRecording();
             }
         }, null);
 
         if (!startRecording(width, height, dpi, bitrate)) {
+            Log.e(TAG, "startRecording failed");
+            cleanup();
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
 
         sRunning = true;
+        sStartTime = SystemClock.elapsedRealtime();
+        Log.i(TAG, "Recording active: " + outputPath);
+
         return START_NOT_STICKY;
     }
 
@@ -120,60 +155,72 @@ public class RecordService extends Service {
             recorder.prepare();
 
             virtualDisplay = projection.createVirtualDisplay(
-                    "ScreenRec",
-                    w, h, dpi,
+                    "ScreenRec", w, h, dpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    recorder.getSurface(),
-                    null, null);
+                    recorder.getSurface(), null, null);
 
             recorder.start();
-            Log.i(TAG, "Recording started: " + outputPath);
             return true;
 
         } catch (Exception e) {
-            Log.e(TAG, "startRecording failed", e);
-            cleanup();
+            Log.e(TAG, "MediaRecorder setup failed", e);
             return false;
         }
     }
 
     private void stopRecording() {
-        if (!sRunning) return;
+        if (!sRunning) {
+            stopForeground(true);
+            stopSelf();
+            return;
+        }
         sRunning = false;
 
+        String saved = outputPath;
+
         try {
-            if (recorder != null) {
-                recorder.stop();
-                Log.i(TAG, "Saved: " + outputPath);
-            }
+            if (recorder != null) recorder.stop();
         } catch (Exception e) {
-            Log.w(TAG, "stop error (file may be short)", e);
+            Log.w(TAG, "recorder.stop() error", e);
         }
 
         cleanup();
+
+        if (saved != null) {
+            File f = new File(saved);
+            if (f.exists() && f.length() > 0) {
+                long kb = f.length() / 1024;
+                Log.i(TAG, "Saved: " + saved + " (" + kb + " KB)");
+                try {
+                    Toast.makeText(this, "Saved: " + f.getName() + " (" + kb + " KB)",
+                            Toast.LENGTH_LONG).show();
+                } catch (Exception ignored) {}
+            }
+        }
+
         stopForeground(true);
         stopSelf();
     }
 
     private void cleanup() {
         if (virtualDisplay != null) {
-            virtualDisplay.release();
+            try { virtualDisplay.release(); } catch (Exception ignored) {}
             virtualDisplay = null;
         }
         if (recorder != null) {
             try { recorder.reset(); } catch (Exception ignored) {}
-            recorder.release();
+            try { recorder.release(); } catch (Exception ignored) {}
             recorder = null;
         }
         if (projection != null) {
-            projection.stop();
+            try { projection.stop(); } catch (Exception ignored) {}
             projection = null;
         }
     }
 
     @Override
     public void onDestroy() {
-        stopRecording();
+        if (sRunning) stopRecording();
         super.onDestroy();
     }
 
@@ -186,7 +233,7 @@ public class RecordService extends Service {
                     Environment.DIRECTORY_MOVIES), "ScreenRec");
         }
         if (!dir.exists() && !dir.mkdirs()) {
-            Log.e(TAG, "Cannot create dir: " + dir);
+            Log.e(TAG, "Cannot create output dir: " + dir);
             return null;
         }
         String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
@@ -198,20 +245,23 @@ public class RecordService extends Service {
             NotificationChannel ch = new NotificationChannel(
                     CHANNEL_ID, "Screen Recording",
                     NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("Active screen recording");
-            getSystemService(NotificationManager.class).createNotificationChannel(ch);
+            ch.setDescription("Shows while screen recording is active");
+            ch.setShowBadge(false);
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.createNotificationChannel(ch);
         }
     }
 
-    private Notification buildNotification() {
+    private Notification buildNotification(boolean recording) {
         Intent stopIntent = new Intent(this, RecordService.class);
-        stopIntent.putExtra("stop", true);
+        stopIntent.setAction(ACTION_STOP);
 
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= 31) piFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent, piFlags);
 
         Intent openIntent = new Intent(this, MainActivity.class);
+        openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent openPi = PendingIntent.getActivity(this, 1, openIntent, piFlags);
 
         Notification.Builder b;
@@ -221,15 +271,21 @@ public class RecordService extends Service {
             b = new Notification.Builder(this);
         }
 
-        b.setContentTitle("Screen Recording")
-         .setContentText("Tap to open | Recording in progress")
-         .setSmallIcon(android.R.drawable.ic_media_play)
+        b.setContentTitle("REC ● Screen Recording")
+         .setContentText("Recording in progress — tap STOP to finish")
+         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
          .setContentIntent(openPi)
-         .setOngoing(true);
+         .setOngoing(true)
+         .setOnlyAlertOnce(true);
+
+        if (recording && Build.VERSION.SDK_INT >= 24) {
+            b.setUsesChronometer(true)
+             .setWhen(System.currentTimeMillis());
+        }
 
         if (Build.VERSION.SDK_INT >= 20) {
             b.addAction(new Notification.Action.Builder(
-                    null, "STOP", stopPi).build());
+                    null, "⏹ STOP", stopPi).build());
         }
 
         return b.build();

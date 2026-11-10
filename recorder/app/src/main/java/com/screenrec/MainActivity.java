@@ -8,6 +8,9 @@ import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.View;
 import android.view.WindowManager;
@@ -23,10 +26,26 @@ public class MainActivity extends Activity {
 
     private MediaProjectionManager projMgr;
     private Button btnStart, btnStop;
-    private TextView tvStatus;
+    private TextView tvStatus, tvTimer;
     private RadioGroup rgQuality;
 
-    private int screenW, screenH, screenDpi;
+    private int screenDpi;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable timerRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (RecordService.isRunning()) {
+                long elapsed = SystemClock.elapsedRealtime() - RecordService.getStartTime();
+                int secs = (int)(elapsed / 1000);
+                int m = secs / 60, s = secs % 60;
+                tvTimer.setText(String.format("%02d:%02d", m, s));
+                tvTimer.setVisibility(View.VISIBLE);
+                handler.postDelayed(this, 1000);
+            } else {
+                tvTimer.setVisibility(View.GONE);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,6 +55,7 @@ public class MainActivity extends Activity {
         btnStart  = findViewById(R.id.btn_start);
         btnStop   = findViewById(R.id.btn_stop);
         tvStatus  = findViewById(R.id.tv_status);
+        tvTimer   = findViewById(R.id.tv_timer);
         rgQuality = findViewById(R.id.rg_quality);
 
         projMgr = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -43,20 +63,22 @@ public class MainActivity extends Activity {
         DisplayMetrics dm = new DisplayMetrics();
         ((WindowManager) getSystemService(WINDOW_SERVICE))
                 .getDefaultDisplay().getMetrics(dm);
-        screenW   = dm.widthPixels;
-        screenH   = dm.heightPixels;
         screenDpi = dm.densityDpi;
 
         btnStart.setOnClickListener(v -> requestRecording());
         btnStop.setOnClickListener(v -> stopRecording());
-
-        updateUI(RecordService.isRunning());
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         updateUI(RecordService.isRunning());
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        handler.removeCallbacks(timerRunnable);
     }
 
     private void requestRecording() {
@@ -68,13 +90,21 @@ public class MainActivity extends Activity {
                 return;
             }
         }
-        startActivityForResult(projMgr.createScreenCaptureIntent(), REQ_PROJECTION);
+        startProjectionRequest();
+    }
+
+    private void startProjectionRequest() {
+        try {
+            startActivityForResult(projMgr.createScreenCaptureIntent(), REQ_PROJECTION);
+        } catch (Exception e) {
+            Toast.makeText(this, "Screen capture not supported", Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
         if (req == REQ_NOTIFY) {
-            startActivityForResult(projMgr.createScreenCaptureIntent(), REQ_PROJECTION);
+            startProjectionRequest();
         }
     }
 
@@ -97,30 +127,48 @@ public class MainActivity extends Activity {
         svc.putExtra("dpi", screenDpi);
         svc.putExtra("bitrate", bitrate);
 
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(svc);
-        } else {
-            startService(svc);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(svc);
+            } else {
+                startService(svc);
+            }
+            Toast.makeText(this, "Recording started!", Toast.LENGTH_SHORT).show();
+            updateUI(true);
+
+            // Go back to home so user can open the game
+            handler.postDelayed(() -> moveTaskToBack(true), 300);
+
+        } catch (Exception e) {
+            Toast.makeText(this, "Failed to start: " + e.getMessage(),
+                    Toast.LENGTH_LONG).show();
         }
-
-        updateUI(true);
-        Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show();
-
-        moveTaskToBack(true);
     }
 
     private void stopRecording() {
         Intent svc = new Intent(this, RecordService.class);
-        svc.putExtra("stop", true);
+        svc.setAction(RecordService.ACTION_STOP);
         startService(svc);
-        updateUI(false);
+
+        handler.postDelayed(() -> updateUI(false), 500);
     }
 
     private void updateUI(boolean recording) {
         btnStart.setEnabled(!recording);
+        btnStart.setAlpha(recording ? 0.4f : 1.0f);
         btnStop.setEnabled(recording);
-        tvStatus.setText(recording ? "REC" : "READY");
-        tvStatus.setTextColor(recording ? 0xFFFF4444 : 0xFF88FF88);
+        btnStop.setAlpha(recording ? 1.0f : 0.4f);
+
+        if (recording) {
+            tvStatus.setText("● REC");
+            tvStatus.setTextColor(0xFFFF4444);
+            handler.post(timerRunnable);
+        } else {
+            tvStatus.setText("READY");
+            tvStatus.setTextColor(0xFF88FF88);
+            tvTimer.setVisibility(View.GONE);
+            handler.removeCallbacks(timerRunnable);
+        }
     }
 
     private int[] getSelectedResolution() {

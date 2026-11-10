@@ -282,7 +282,7 @@ namespace player {
     // Last-resort camera: yjp (ios) transform pivot + kgd quaternion, FOV 60.
     inline std::vector<camera_candidate> camera_fallback_candidates(uint64_t local_player) {
         std::vector<camera_candidate> result = camera_state_candidates(local_player);
-        const uint64_t ios_class = rpm<uint64_t>(proc::lib + v100::ios_typeinfo);
+        const uint64_t ios_class = typeinfo(v100::ios_typeinfo);
         const uint64_t controller = find_player_component(local_player, ios_class);
         if (!controller) return result;
 
@@ -323,8 +323,8 @@ namespace player {
     // Fallback: nzk parts array (+0x20 cew[]) for mtc/bis components.
     inline std::vector<uint64_t> transform_candidates(uint64_t p) {
         std::vector<uint64_t> result;
-        const uint64_t transforms_class = rpm<uint64_t>(proc::lib + v100::transforms_typeinfo);
-        const uint64_t model_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
+        const uint64_t transforms_class = typeinfo(v100::transforms_typeinfo);
+        const uint64_t model_class = typeinfo(v100::model_typeinfo);
 
         const uint64_t direct = rpm<uint64_t>(p + v100::player_transform);
         if (!obj_ptr(direct)) return result; // despawned/dead NetObject
@@ -401,7 +401,7 @@ namespace player {
         HealthInfo out{};
         if (!obj_ptr(p)) return out;
         const uint64_t stats = rpm<uint64_t>(p + v100::player_stats);
-        const uint64_t stats_class = rpm<uint64_t>(proc::lib + v100::stats_typeinfo);
+        const uint64_t stats_class = typeinfo(v100::stats_typeinfo);
         if (!exact_class(stats, stats_class)) return out;
         // ydm: +0x10 espa (hp), +0x12 htat, +0x14 ktmm (max hp) - one read.
         uint16_t block[3]{};

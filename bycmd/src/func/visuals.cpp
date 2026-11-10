@@ -145,6 +145,7 @@ void visuals::draw() {
     // use it as is. Every other source is scored against the live player
     // coordinates so a UI/preview/arms camera cannot win.
     matrix ViewMatrix{}, ProjectionMatrix{};
+    static int selected_kind_prev = camera_kind_unknown;
     uint64_t selected_camera = 0;
     int selected_kind = camera_kind_unknown;
     int selected_score = -1, selected_front = 0, selected_onscreen = 0;
@@ -194,7 +195,10 @@ void visuals::draw() {
                 case camera_kind_heap_camera: score += 5; break;
                 default: break;
             }
-            if (Camera.address == g_camera) score += 5; // hysteresis against camera tearing
+            // Strong hysteresis: the synthetic sources (main-bor / vqn-bor /
+            // ios-transform) score within a few points of each other and
+            // flipping between them every few frames is itself a visible jump.
+            if (Camera.address == g_camera && Camera.kind == selected_kind_prev) score += 40;
             if (log_candidates)
                 diag::log("CAMERA", "candidate=0x%llx kind=%s score=%d front=%d onscreen=%d localDistance=%.2f proj=(%.3f %.3f)",
                           (unsigned long long)Camera.address, camera_kind_name(Camera.kind), score, front, onscreen,
@@ -224,6 +228,7 @@ void visuals::draw() {
         STATUS_SET(camera, "camera: %s", camera_kind_name(selected_kind));
     }
     g_camera = selected_camera;
+    selected_kind_prev = selected_kind;
 
     for (const auto& Enemy : frame_enemies) {
         ImVec2 ScreenHead, ScreenFoot;

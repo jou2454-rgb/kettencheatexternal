@@ -186,6 +186,18 @@ inline bool exact_class(uint64_t object, uint64_t klass) {
 // values also contain floats/ints which must not be probed as pointers.
 inline bool obj_ptr(uint64_t p) { return p >= 0x100000000ULL && p < 0x800000000000ULL; }
 
+// Il2CppClass* from a TypeInfo slot. On this il2cpp the slots are lazy: until
+// generated code touches the class the slot holds an encoded metadata index
+// (observed 0x2002xxxx for kmc/wot during a whole match, because they are
+// constructed through generic/DI paths that never initialise the global
+// slot). Such a value must never be compared against object headers.
+inline uint64_t typeinfo(uint64_t rva, uint64_t lib = 0) {
+    const uint64_t base = lib ? lib : proc::lib;
+    if (!base) return 0;
+    const uint64_t value = rpm<uint64_t>(base + rva);
+    return obj_ptr(value) ? value : 0;
+}
+
 // ---- il2cpp klass name resolution (sanity checks only) ----
 // This build uses a newer il2cpp metadata layout than the old v24
 // `name@+0x10` scheme. Observed on a live 1.0.0 instance by the previous
@@ -248,7 +260,7 @@ namespace il2cpp {
         if (g_layout) return true;
         static long long last_probe = 0;
         if (!force && !diag::every(last_probe, 1000)) return false;
-        const uint64_t known = rpm<uint64_t>(proc::lib + v100::registry_typeinfo);
+        const uint64_t known = typeinfo(v100::registry_typeinfo);
         if (!plausible(known)) return false;
         std::string name;
         if (read_ascii(rpm<uint64_t>(known + k_name_off), name, false) && looks_like_identifier(name)) {
@@ -316,7 +328,7 @@ namespace game {
 
         // Secondary check: the Camera TypeInfo slot must name "Camera" on the
         // live il2cpp metadata. Needs the klass layout probe to succeed.
-        const uint64_t camera_klass = rpm<uint64_t>(proc::lib + v100::camera_typeinfo);
+        const uint64_t camera_klass = typeinfo(v100::camera_typeinfo);
         std::string name, ns;
         const bool name_readable = il2cpp::klass_identity(camera_klass, name, ns, true);
         const bool camera_ok = name_readable && name == "Camera";
@@ -418,7 +430,23 @@ namespace scanner {
     inline std::atomic<bool> g_run{false};
     inline std::atomic<bool> g_rescan{true};
     inline std::atomic<bool> g_busy{false};
+    // Set by the camera resolver while it has no locked camera. Without it
+    // the scanner only re-passes when the registry is missing: a full pass
+    // reads ~4 GiB on this game and must not run every 15 s for nothing.
+    inline std::atomic<bool> g_want_more{true};
     inline std::thread g_thread;
+
+    // Mappings that can never hold il2cpp objects. Names come from
+    // prctl(PR_SET_VMA_ANON_NAME) on Android 11+.
+    inline bool skip_mapping(const char* line) {
+        static const char* skip[] = {"[anon:dalvik", "[anon:stack_and_tls", "[anon:linker_alloc",
+            "[anon:thread signal stack", "[anon:bionic_alloc", "[anon:cfi shadow",
+            "[anon:arc4random", "[anon:atexit", "[anon:System property", "[anon:.bss]",
+            "[vvar]", "[vdso]", "[heap]"};
+        for (const char* name : skip)
+            if (std::strstr(line, name)) return true;
+        return false;
+    }
 
     inline results snapshot() {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -445,7 +473,7 @@ namespace scanner {
             if (perms[0] != 'r' || perms[1] != 'w' || end <= begin) continue;
             const uint64_t size = end - begin;
             if (size < 0x1000 || size > 4096ULL * 1024 * 1024) continue;
-            if (std::strchr(line, '/') || std::strstr(line, "[stack")) continue;
+            if (std::strchr(line, '/') || std::strstr(line, "[stack") || skip_mapping(line)) continue;
             maps.push_back({begin, end, true});
         }
         std::fclose(file);
@@ -453,15 +481,16 @@ namespace scanner {
     }
 
     inline void pass(int pid, uint64_t lib) {
-        const uint64_t registry_class = rpm<uint64_t>(lib + v100::registry_typeinfo);
-        const uint64_t store_class = rpm<uint64_t>(lib + v100::store_typeinfo);
-        const uint64_t kmc_class = rpm<uint64_t>(lib + v100::camera_main_typeinfo);
-        const uint64_t wot_class = rpm<uint64_t>(lib + v100::camera_arms_typeinfo);
-        const uint64_t animation_class = rpm<uint64_t>(lib + v100::animation_data_typeinfo);
-        const uint64_t camera_class = rpm<uint64_t>(lib + v100::camera_typeinfo);
+        const uint64_t registry_class = typeinfo(v100::registry_typeinfo, lib);
+        const uint64_t store_class = typeinfo(v100::store_typeinfo, lib);
+        const uint64_t kmc_class = typeinfo(v100::camera_main_typeinfo, lib);
+        const uint64_t wot_class = typeinfo(v100::camera_arms_typeinfo, lib);
+        const uint64_t animation_class = typeinfo(v100::animation_data_typeinfo, lib);
+        const uint64_t camera_class = typeinfo(v100::camera_typeinfo, lib);
         if (!registry_class || !store_class) {
-            diag::log("SCAN", "TypeInfo registry=0x%llx store=0x%llx not initialised yet",
-                      (unsigned long long)registry_class, (unsigned long long)store_class);
+            diag::log("SCAN", "TypeInfo registry=0x%llx store=0x%llx not initialised yet (lazy slots)",
+                      (unsigned long long)rpm<uint64_t>(lib + v100::registry_typeinfo),
+                      (unsigned long long)rpm<uint64_t>(lib + v100::store_typeinfo));
             return;
         }
         const std::vector<remote_map> maps = read_maps(pid);
@@ -506,7 +535,7 @@ namespace scanner {
                         } else if (word == animation_class && animation_class) {
                             if (local.animation.size() < 32) local.animation.push_back(object);
                         } else if (word == camera_class && camera_class) {
-                            if (local.cameras.size() < 64 && obj_ptr(rpm<uint64_t>(object + v100::unity_cached_ptr)))
+                            if (local.cameras.size() < 128 && obj_ptr(rpm<uint64_t>(object + v100::unity_cached_ptr)))
                                 local.cameras.push_back(object);
                         }
                     }
@@ -549,7 +578,20 @@ namespace scanner {
                     g_rescan = true;
                 }
             }
-            if (!g_rescan) {
+            bool essential_missing = false;
+            long long last_pass = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                essential_missing = g_results.registry == 0 || g_results.cameras.empty();
+                last_pass = g_results.last_pass_ms;
+            }
+            const long long since_pass = diag::now_ms() - last_pass;
+            // A pass is worth its CPU only while something is still missing:
+            // the registry (before/after a match) or a camera for the
+            // resolver. Once everything is locked the thread idles.
+            const bool due = (g_rescan && since_pass > 3000) ||
+                             ((essential_missing || g_want_more) && since_pass > 15000);
+            if (!due) {
                 sleep_ms(100);
                 continue;
             }
@@ -557,14 +599,7 @@ namespace scanner {
             g_busy = true;
             pass(pid, lib);
             g_busy = false;
-            // Objects are re-created on map change / respawn; a slow periodic
-            // re-pass keeps the candidate list fresh without a request.
-            long long waited = 0;
-            while (g_run && !g_rescan && waited < 15000 && proc::pid == pid) {
-                sleep_ms(100);
-                waited += 100;
-            }
-            g_rescan = true;
+            sleep_ms(3000);
         }
     }
 
@@ -619,12 +654,12 @@ inline int resolve_local_flag(const std::vector<uint64_t>& objects) {
 
 inline bool registry_ready() {
     ensure_scan_context();
-    const uint64_t registry_class = rpm<uint64_t>(proc::lib + v100::registry_typeinfo);
-    const uint64_t store_class = rpm<uint64_t>(proc::lib + v100::store_typeinfo);
+    const uint64_t registry_class = typeinfo(v100::registry_typeinfo);
+    const uint64_t store_class = typeinfo(v100::store_typeinfo);
     static long long type_log = 0;
     if (diag::every(type_log, 5000))
         diag::log(registry_class && store_class ? "INFO" : "ERROR",
-                  "TypeInfo registry=0x%llx store=0x%llx player=0x%llx transforms=0x%llx kmc=0x%llx wot=0x%llx",
+                  "TypeInfo registry=0x%llx store=0x%llx player=0x%llx transforms=0x%llx kmc=0x%llx wot=0x%llx (0x2xxxxxxx = lazy slot, class not initialised by generated code)",
                   (unsigned long long)registry_class, (unsigned long long)store_class,
                   (unsigned long long)rpm<uint64_t>(proc::lib + v100::player_typeinfo),
                   (unsigned long long)rpm<uint64_t>(proc::lib + v100::transforms_typeinfo),
@@ -649,7 +684,7 @@ inline bool registry_ready() {
 inline std::vector<uint64_t> players() {
     std::vector<uint64_t> out;
     if (!registry_ready()) return out;
-    const uint64_t player_class = rpm<uint64_t>(proc::lib + v100::player_typeinfo);
+    const uint64_t player_class = typeinfo(v100::player_typeinfo);
     uint64_t store = rpm<uint64_t>(g_registry + v100::registry_store);
     uint64_t list = rpm<uint64_t>(store + v100::store_objects);
     int count = rpm<int>(list + v100::list_count);
@@ -840,12 +875,35 @@ inline bool validate_camera(uint64_t camera, matrix& view, matrix& projection) {
            std::fabs(v[11]) < .001f && std::fabs(v[15] - 1.f) < .01f && std::fabs(p[0]) > .001f && std::fabs(p[5]) > .001f;
 }
 
+// Snapshot of a native Camera object. Unity keeps worldToCamera, projection,
+// implicit/skybox/clip variants inline; the object is larger than 0x300, so
+// read up to 0x800 and fall back to shorter windows when the tail is unmapped.
+inline constexpr size_t k_camera_block = 0x800;
+inline size_t read_camera_block(uint64_t native, uint8_t* buf) {
+    for (size_t size : {k_camera_block, size_t(0x400), size_t(0x300)}) {
+        if (mem_read(native, buf, size)) return size;
+    }
+    return 0;
+}
+
+// Every 16-byte aligned window that looks like a view or a projection matrix.
+inline void scan_matrix_windows(const uint8_t* buf, size_t size, std::vector<int>& views, std::vector<int>& projs) {
+    views.clear();
+    projs.clear();
+    for (size_t off = 0x40; off + sizeof(matrix) <= size; off += 0x10) {
+        const float* m = reinterpret_cast<const float*>(buf + off);
+        if (matrix_window_sane(m, true)) views.push_back(int(off));
+        else if (matrix_window_sane(m, false)) projs.push_back(int(off));
+    }
+}
+
 // Generic pattern scan: find (view,proj) matrix pair inside a native Camera
 // by float patterns. The known Unity layout (+0x70/+0xB0) is tried first.
 inline bool detect_pair(uint64_t obj, matrix& view, matrix& projection,
                         int& view_off, int& proj_off, const char* tag) {
-    uint8_t buf[0x300]{};
-    if (!mem_read(obj, buf, sizeof(buf))) return false;
+    uint8_t buf[k_camera_block]{};
+    const size_t size = read_camera_block(obj, buf);
+    if (!size) return false;
     auto at = [&](int off) -> const float* {
         return reinterpret_cast<const float*>(buf + off);
     };
@@ -853,30 +911,20 @@ inline bool detect_pair(uint64_t obj, matrix& view, matrix& projection,
         matrix_window_sane(at(int(v100::camera_projection)), false)) {
         view_off = int(v100::camera_view);
         proj_off = int(v100::camera_projection);
-        std::memcpy(&view, at(view_off), sizeof(view));
-        std::memcpy(&projection, at(proj_off), sizeof(projection));
-        const float* p = at(proj_off);
-        diag::log("CAMERA", "%s known-pair obj=0x%llx view=+0x%x proj=+0x%x fov=%.1f proj=(%.3f %.3f)",
-                  tag, (unsigned long long)obj, view_off, proj_off,
-                  2.f * std::atan(1.f / p[5]) * 57.29578f, p[0], p[5]);
-        return true;
+    } else {
+        std::vector<int> views, projs;
+        scan_matrix_windows(buf, size, views, projs);
+        if (views.empty() || projs.empty()) return false;
+        view_off = views.front();
+        proj_off = projs.front();
     }
-    for (int vo = 0x40; vo <= 0x2C0; vo += 0x10) {
-        if (!matrix_window_sane(at(vo), true)) continue;
-        for (int po = 0x40; po <= 0x2C0; po += 0x10) {
-            if (po == vo) continue;
-            if (!matrix_window_sane(at(po), false)) continue;
-            view_off = vo; proj_off = po;
-            std::memcpy(&view, at(vo), sizeof(view));
-            std::memcpy(&projection, at(po), sizeof(projection));
-            const float* p = at(po);
-            diag::log("CAMERA", "%s pair obj=0x%llx view=+0x%x proj=+0x%x fov=%.1f proj=(%.3f %.3f)",
-                      tag, (unsigned long long)obj, vo, po,
-                      2.f * std::atan(1.f / p[5]) * 57.29578f, p[0], p[5]);
-            return true;
-        }
-    }
-    return false;
+    std::memcpy(&view, at(view_off), sizeof(view));
+    std::memcpy(&projection, at(proj_off), sizeof(projection));
+    const float* p = at(proj_off);
+    diag::log("CAMERA", "%s pair obj=0x%llx view=+0x%x proj=+0x%x fov=%.1f proj=(%.3f %.3f)",
+              tag, (unsigned long long)obj, view_off, proj_off,
+              2.f * std::atan(1.f / p[5]) * 57.29578f, p[0], p[5]);
+    return true;
 }
 
 // Re-read a pattern-located matrix pair. Two syscalls per frame.

@@ -1,0 +1,30 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main", "ccr-*" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+
+      - name: ndk-build
+        run: |
+          cd bycmd
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./jni/Android.mk NDK_APPLICATION_MK=./jni/Application.mk
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeeww-arm64
+          path: bycmd/libs/arm64-v8a/eeeww

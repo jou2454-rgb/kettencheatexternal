@@ -75,12 +75,21 @@ public class RecordService extends Service {
 
         if (code == -1 || data == null) {
             Log.e(TAG, "Missing projection data");
+            toast("Error: missing projection data");
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        // MUST call startForeground BEFORE getMediaProjection on Android 10+
-        Notification notif = buildNotification(true);
+        Notification notif;
+        try {
+            notif = buildNotification();
+        } catch (Exception e) {
+            Log.e(TAG, "buildNotification failed", e);
+            toast("Error building notification: " + e.getMessage());
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         try {
             if (Build.VERSION.SDK_INT >= 29) {
                 startForeground(NOTIF_ID, notif,
@@ -90,23 +99,37 @@ public class RecordService extends Service {
             }
         } catch (Exception e) {
             Log.e(TAG, "startForeground failed", e);
+            toast("startForeground error: " + e.getMessage());
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        MediaProjectionManager mgr = (MediaProjectionManager)
-                getSystemService(MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager mgr;
+        try {
+            mgr = (MediaProjectionManager)
+                    getSystemService(MEDIA_PROJECTION_SERVICE);
+        } catch (Exception e) {
+            Log.e(TAG, "getSystemService failed", e);
+            toast("System service error: " + e.getMessage());
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
 
         try {
             projection = mgr.getMediaProjection(code, data);
         } catch (Exception e) {
             Log.e(TAG, "getMediaProjection failed", e);
+            toast("Projection error: " + e.getMessage());
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
 
         if (projection == null) {
             Log.e(TAG, "MediaProjection is null");
+            toast("Error: projection is null");
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -130,13 +153,17 @@ public class RecordService extends Service {
         sRunning = true;
         sStartTime = SystemClock.elapsedRealtime();
         Log.i(TAG, "Recording active: " + outputPath);
+        toast("Recording started");
 
         return START_NOT_STICKY;
     }
 
     private boolean startRecording(int w, int h, int dpi, int bitrate) {
         outputPath = getOutputPath();
-        if (outputPath == null) return false;
+        if (outputPath == null) {
+            toast("Error: cannot create output directory");
+            return false;
+        }
 
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -164,6 +191,7 @@ public class RecordService extends Service {
 
         } catch (Exception e) {
             Log.e(TAG, "MediaRecorder setup failed", e);
+            toast("Recorder error: " + e.getMessage());
             return false;
         }
     }
@@ -191,10 +219,7 @@ public class RecordService extends Service {
             if (f.exists() && f.length() > 0) {
                 long kb = f.length() / 1024;
                 Log.i(TAG, "Saved: " + saved + " (" + kb + " KB)");
-                try {
-                    Toast.makeText(this, "Saved: " + f.getName() + " (" + kb + " KB)",
-                            Toast.LENGTH_LONG).show();
-                } catch (Exception ignored) {}
+                toast("Saved: " + f.getName() + " (" + kb + " KB)");
             }
         }
 
@@ -252,7 +277,7 @@ public class RecordService extends Service {
         }
     }
 
-    private Notification buildNotification(boolean recording) {
+    private Notification buildNotification() {
         Intent stopIntent = new Intent(this, RecordService.class);
         stopIntent.setAction(ACTION_STOP);
 
@@ -271,23 +296,29 @@ public class RecordService extends Service {
             b = new Notification.Builder(this);
         }
 
-        b.setContentTitle("REC ● Screen Recording")
-         .setContentText("Recording in progress — tap STOP to finish")
-         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        b.setContentTitle("REC - Screen Recording")
+         .setContentText("Recording in progress")
+         .setSmallIcon(R.drawable.ic_rec)
          .setContentIntent(openPi)
          .setOngoing(true)
          .setOnlyAlertOnce(true);
 
-        if (recording && Build.VERSION.SDK_INT >= 24) {
+        if (Build.VERSION.SDK_INT >= 24) {
             b.setUsesChronometer(true)
              .setWhen(System.currentTimeMillis());
         }
 
         if (Build.VERSION.SDK_INT >= 20) {
             b.addAction(new Notification.Action.Builder(
-                    null, "⏹ STOP", stopPi).build());
+                    null, "STOP", stopPi).build());
         }
 
         return b.build();
+    }
+
+    private void toast(String msg) {
+        try {
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+        } catch (Exception ignored) {}
     }
 }

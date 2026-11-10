@@ -14,6 +14,7 @@ import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.widget.Button;
 import android.widget.RadioGroup;
 import android.widget.TextView;
@@ -60,10 +61,16 @@ public class MainActivity extends Activity {
 
         projMgr = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
 
-        DisplayMetrics dm = new DisplayMetrics();
-        ((WindowManager) getSystemService(WINDOW_SERVICE))
-                .getDefaultDisplay().getMetrics(dm);
-        screenDpi = dm.densityDpi;
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowMetrics wm = getWindowManager().getCurrentWindowMetrics();
+            android.content.res.Configuration cfg = getResources().getConfiguration();
+            screenDpi = cfg.densityDpi;
+        } else {
+            DisplayMetrics dm = new DisplayMetrics();
+            ((WindowManager) getSystemService(WINDOW_SERVICE))
+                    .getDefaultDisplay().getMetrics(dm);
+            screenDpi = dm.densityDpi;
+        }
 
         btnStart.setOnClickListener(v -> requestRecording());
         btnStop.setOnClickListener(v -> stopRecording());
@@ -97,7 +104,8 @@ public class MainActivity extends Activity {
         try {
             startActivityForResult(projMgr.createScreenCaptureIntent(), REQ_PROJECTION);
         } catch (Exception e) {
-            Toast.makeText(this, "Screen capture not supported", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Screen capture not supported: " + e.getMessage(),
+                    Toast.LENGTH_LONG).show();
         }
     }
 
@@ -119,15 +127,15 @@ public class MainActivity extends Activity {
         int[] res = getSelectedResolution();
         int bitrate = getSelectedBitrate();
 
-        Intent svc = new Intent(this, RecordService.class);
-        svc.putExtra("code", resultCode);
-        svc.putExtra("data", data);
-        svc.putExtra("width", res[0]);
-        svc.putExtra("height", res[1]);
-        svc.putExtra("dpi", screenDpi);
-        svc.putExtra("bitrate", bitrate);
-
         try {
+            Intent svc = new Intent(this, RecordService.class);
+            svc.putExtra("code", resultCode);
+            svc.putExtra("data", data);
+            svc.putExtra("width", res[0]);
+            svc.putExtra("height", res[1]);
+            svc.putExtra("dpi", screenDpi);
+            svc.putExtra("bitrate", bitrate);
+
             if (Build.VERSION.SDK_INT >= 26) {
                 startForegroundService(svc);
             } else {
@@ -136,7 +144,6 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Recording started!", Toast.LENGTH_SHORT).show();
             updateUI(true);
 
-            // Go back to home so user can open the game
             handler.postDelayed(() -> moveTaskToBack(true), 300);
 
         } catch (Exception e) {
@@ -146,9 +153,14 @@ public class MainActivity extends Activity {
     }
 
     private void stopRecording() {
-        Intent svc = new Intent(this, RecordService.class);
-        svc.setAction(RecordService.ACTION_STOP);
-        startService(svc);
+        try {
+            Intent svc = new Intent(this, RecordService.class);
+            svc.setAction(RecordService.ACTION_STOP);
+            startService(svc);
+        } catch (Exception e) {
+            Toast.makeText(this, "Stop error: " + e.getMessage(),
+                    Toast.LENGTH_LONG).show();
+        }
 
         handler.postDelayed(() -> updateUI(false), 500);
     }

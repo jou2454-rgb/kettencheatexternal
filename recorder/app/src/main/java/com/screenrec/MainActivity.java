@@ -120,15 +120,21 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode != REQ_PROJECTION) return;
         if (resultCode != RESULT_OK || data == null) {
-            Toast.makeText(this, "Permission denied", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Permission denied (code=" + resultCode + " data=" + (data != null) + ")",
+                    Toast.LENGTH_LONG).show();
             return;
         }
+
+        Toast.makeText(this, "Got projection: code=" + resultCode, Toast.LENGTH_SHORT).show();
 
         int[] res = getSelectedResolution();
         int bitrate = getSelectedBitrate();
 
         try {
-            RecordService.setPendingProjection(resultCode, data);
+            App.setProjection(resultCode, data);
+
+            Toast.makeText(this, "Stored: data=" + (App.projData != null),
+                    Toast.LENGTH_SHORT).show();
 
             Intent svc = new Intent(this, RecordService.class);
             svc.putExtra("width", res[0]);
@@ -141,13 +147,15 @@ public class MainActivity extends Activity {
             } else {
                 startService(svc);
             }
-            Toast.makeText(this, "Recording started!", Toast.LENGTH_SHORT).show();
-            updateUI(true);
 
-            handler.postDelayed(() -> moveTaskToBack(true), 300);
+            Toast.makeText(this, "Service started, check=" + (App.projData != null),
+                    Toast.LENGTH_SHORT).show();
+
+            updateUI(true);
+            handler.postDelayed(() -> moveTaskToBack(true), 500);
 
         } catch (Exception e) {
-            Toast.makeText(this, "Failed to start: " + e.getMessage(),
+            Toast.makeText(this, "Failed: " + e.getMessage(),
                     Toast.LENGTH_LONG).show();
         }
     }

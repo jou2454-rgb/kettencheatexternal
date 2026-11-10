@@ -1,6 +1,7 @@
 package com.screenrec;
 
 import android.app.Application;
+import android.content.Intent;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -13,6 +14,37 @@ import java.nio.charset.StandardCharsets;
 public class App extends Application {
 
     private static final String CRASH_FILE = "last_crash.txt";
+
+    public static int projCode = -1;
+    public static Intent projData = null;
+    public static long projSetAt = 0;
+
+    public static void setProjection(int code, Intent data) {
+        projCode = code;
+        projData = data;
+        projSetAt = System.currentTimeMillis();
+        Log.i("ScreenRec", "setProjection: code=" + code
+                + " data=" + (data != null)
+                + " hash=" + (data != null ? System.identityHashCode(data) : 0));
+    }
+
+    public static Intent consumeProjection() {
+        Intent d = projData;
+        int c = projCode;
+        long age = System.currentTimeMillis() - projSetAt;
+        Log.i("ScreenRec", "consumeProjection: code=" + c
+                + " data=" + (d != null)
+                + " age=" + age + "ms"
+                + " hash=" + (d != null ? System.identityHashCode(d) : 0));
+        projCode = -1;
+        projData = null;
+        return d;
+    }
+
+    public static int consumeCode() {
+        int c = projCode;
+        return c;
+    }
 
     @Override
     public void onCreate() {

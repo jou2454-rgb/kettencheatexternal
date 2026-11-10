@@ -35,9 +35,6 @@ public class RecordService extends Service {
     private static volatile boolean sRunning = false;
     private static long sStartTime = 0;
 
-    private static int sPendingCode = -1;
-    private static Intent sPendingData = null;
-
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private MediaRecorder recorder;
@@ -46,11 +43,6 @@ public class RecordService extends Service {
     public static boolean isRunning() { return sRunning; }
     public static long getStartTime() { return sStartTime; }
 
-    public static void setPendingProjection(int code, Intent data) {
-        sPendingCode = code;
-        sPendingData = data;
-    }
-
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
@@ -58,16 +50,21 @@ public class RecordService extends Service {
     public void onCreate() {
         super.onCreate();
         createNotifChannel();
+        toast("Service created");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        toast("onStartCommand: action=" + (intent != null ? intent.getAction() : "null-intent")
+                + " appData=" + (App.projData != null)
+                + " appCode=" + App.projCode);
+
         if (intent == null) {
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        if (ACTION_STOP.equals(intent.getAction()) || intent.getBooleanExtra("stop", false)) {
+        if (ACTION_STOP.equals(intent.getAction())) {
             stopRecording();
             return START_NOT_STICKY;
         }
@@ -79,34 +76,13 @@ public class RecordService extends Service {
         int dpi     = intent.getIntExtra("dpi", 320);
         int bitrate = intent.getIntExtra("bitrate", 8_000_000);
 
-        int code = sPendingCode;
-        Intent data = sPendingData;
-        sPendingCode = -1;
-        sPendingData = null;
-
-        if (code == -1 || data == null) {
-            Log.e(TAG, "Missing projection data (static)");
-            toast("Error: missing projection data");
-            try {
-                Notification n = buildNotification();
-                if (Build.VERSION.SDK_INT >= 29) {
-                    startForeground(NOTIF_ID, n,
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-                } else {
-                    startForeground(NOTIF_ID, n);
-                }
-            } catch (Exception ignored) {}
-            stopForeground(true);
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-
+        // Must startForeground FIRST, always
         Notification notif;
         try {
             notif = buildNotification();
         } catch (Exception e) {
             Log.e(TAG, "buildNotification failed", e);
-            toast("Error building notification: " + e.getMessage());
+            toast("Notification error: " + e.getMessage());
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -118,6 +94,7 @@ public class RecordService extends Service {
             } else {
                 startForeground(NOTIF_ID, notif);
             }
+            toast("startForeground OK");
         } catch (Exception e) {
             Log.e(TAG, "startForeground failed", e);
             toast("startForeground error: " + e.getMessage());
@@ -125,12 +102,24 @@ public class RecordService extends Service {
             return START_NOT_STICKY;
         }
 
+        // Read projection data from App static fields
+        Intent data = App.consumeProjection();
+        int code = App.consumeCode();
+
+        toast("Projection read: code=" + code + " data=" + (data != null));
+
+        if (code == -1 || data == null) {
+            Log.e(TAG, "Missing projection data");
+            toast("Error: no projection data after startForeground");
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         MediaProjectionManager mgr;
         try {
-            mgr = (MediaProjectionManager)
-                    getSystemService(MEDIA_PROJECTION_SERVICE);
+            mgr = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         } catch (Exception e) {
-            Log.e(TAG, "getSystemService failed", e);
             toast("System service error: " + e.getMessage());
             stopForeground(true);
             stopSelf();
@@ -139,6 +128,7 @@ public class RecordService extends Service {
 
         try {
             projection = mgr.getMediaProjection(code, data);
+            toast("getMediaProjection: " + (projection != null ? "OK" : "NULL"));
         } catch (Exception e) {
             Log.e(TAG, "getMediaProjection failed", e);
             toast("Projection error: " + e.getMessage());
@@ -148,7 +138,6 @@ public class RecordService extends Service {
         }
 
         if (projection == null) {
-            Log.e(TAG, "MediaProjection is null");
             toast("Error: projection is null");
             stopForeground(true);
             stopSelf();
@@ -164,7 +153,6 @@ public class RecordService extends Service {
         }, null);
 
         if (!startRecording(width, height, dpi, bitrate)) {
-            Log.e(TAG, "startRecording failed");
             cleanup();
             stopForeground(true);
             stopSelf();
@@ -174,7 +162,7 @@ public class RecordService extends Service {
         sRunning = true;
         sStartTime = SystemClock.elapsedRealtime();
         Log.i(TAG, "Recording active: " + outputPath);
-        toast("Recording started");
+        toast("Recording active!");
 
         return START_NOT_STICKY;
     }
@@ -239,7 +227,6 @@ public class RecordService extends Service {
             File f = new File(saved);
             if (f.exists() && f.length() > 0) {
                 long kb = f.length() / 1024;
-                Log.i(TAG, "Saved: " + saved + " (" + kb + " KB)");
                 toast("Saved: " + f.getName() + " (" + kb + " KB)");
             }
         }

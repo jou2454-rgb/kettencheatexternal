@@ -1,0 +1,4 @@
+#!/bin/sh
+# Gradle wrapper stub — the CI workflow runs `gradle wrapper` to generate the real one.
+# This file exists so the repo has a placeholder.
+echo "Run 'gradle wrapper --gradle-version 8.4' first" && exit 1

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:padding="32dp"
+    android:background="#FF121212">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Screen Recorder"
+        android:textSize="28sp"
+        android:textColor="#FFA290E1"
+        android:textStyle="bold"
+        android:layout_marginTop="40dp" />
+
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="READY"
+        android:textSize="18sp"
+        android:textColor="#FF88FF88"
+        android:layout_marginTop="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Quality"
+        android:textSize="16sp"
+        android:textColor="#CCFFFFFF"
+        android:layout_marginTop="40dp" />
+
+    <RadioGroup
+        android:id="@+id/rg_quality"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
+
+        <RadioButton
+            android:id="@+id/rb_480"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="480p"
+            android:textColor="#CCFFFFFF"
+            android:buttonTint="#FFA290E1" />
+
+        <RadioButton
+            android:id="@+id/rb_720"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="720p"
+            android:textColor="#CCFFFFFF"
+            android:buttonTint="#FFA290E1"
+            android:checked="true"
+            android:layout_marginStart="16dp" />
+
+        <RadioButton
+            android:id="@+id/rb_1080"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="1080p"
+            android:textColor="#CCFFFFFF"
+            android:buttonTint="#FFA290E1"
+            android:layout_marginStart="16dp" />
+
+    </RadioGroup>
+
+    <Button
+        android:id="@+id/btn_start"
+        android:layout_width="220dp"
+        android:layout_height="56dp"
+        android:text="START REC"
+        android:textSize="18sp"
+        android:textColor="#FFFFFFFF"
+        android:backgroundTint="#FFA290E1"
+        android:layout_marginTop="48dp" />
+
+    <Button
+        android:id="@+id/btn_stop"
+        android:layout_width="220dp"
+        android:layout_height="56dp"
+        android:text="STOP"
+        android:textSize="18sp"
+        android:textColor="#FFFFFFFF"
+        android:backgroundTint="#FFFF4444"
+        android:enabled="false"
+        android:layout_marginTop="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Captures all layers including overlay.\nStop via notification or this button."
+        android:textSize="13sp"
+        android:textColor="#88FFFFFF"
+        android:gravity="center"
+        android:layout_marginTop="32dp" />
+
+</LinearLayout>

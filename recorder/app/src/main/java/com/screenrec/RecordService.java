@@ -35,6 +35,9 @@ public class RecordService extends Service {
     private static volatile boolean sRunning = false;
     private static long sStartTime = 0;
 
+    private static int sPendingCode = -1;
+    private static Intent sPendingData = null;
+
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private MediaRecorder recorder;
@@ -42,6 +45,11 @@ public class RecordService extends Service {
 
     public static boolean isRunning() { return sRunning; }
     public static long getStartTime() { return sStartTime; }
+
+    public static void setPendingProjection(int code, Intent data) {
+        sPendingCode = code;
+        sPendingData = data;
+    }
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -66,16 +74,29 @@ public class RecordService extends Service {
 
         if (sRunning) return START_NOT_STICKY;
 
-        int code    = intent.getIntExtra("code", -1);
-        Intent data = intent.getParcelableExtra("data");
         int width   = intent.getIntExtra("width", 1280);
         int height  = intent.getIntExtra("height", 720);
         int dpi     = intent.getIntExtra("dpi", 320);
         int bitrate = intent.getIntExtra("bitrate", 8_000_000);
 
+        int code = sPendingCode;
+        Intent data = sPendingData;
+        sPendingCode = -1;
+        sPendingData = null;
+
         if (code == -1 || data == null) {
-            Log.e(TAG, "Missing projection data");
+            Log.e(TAG, "Missing projection data (static)");
             toast("Error: missing projection data");
+            try {
+                Notification n = buildNotification();
+                if (Build.VERSION.SDK_INT >= 29) {
+                    startForeground(NOTIF_ID, n,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                } else {
+                    startForeground(NOTIF_ID, n);
+                }
+            } catch (Exception ignored) {}
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }

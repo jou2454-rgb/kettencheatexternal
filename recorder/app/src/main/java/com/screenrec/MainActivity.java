@@ -128,9 +128,9 @@ public class MainActivity extends Activity {
         int bitrate = getSelectedBitrate();
 
         try {
+            RecordService.setPendingProjection(resultCode, data);
+
             Intent svc = new Intent(this, RecordService.class);
-            svc.putExtra("code", resultCode);
-            svc.putExtra("data", data);
             svc.putExtra("width", res[0]);
             svc.putExtra("height", res[1]);
             svc.putExtra("dpi", screenDpi);

@@ -33,6 +33,7 @@ namespace {
     std::unordered_map<uint64_t, int> g_last_hp;
     size_t g_name_cursor = 0;
     long long g_last_purge = 0;
+    long long g_last_name_us = 0;
 
     template<typename Map>
     void purge_missing(Map& map, const std::unordered_set<uint64_t>& live) {
@@ -41,6 +42,55 @@ namespace {
             else it = map.erase(it);
         }
     }
+
+    // ---- snapshot interpolation --------------------------------------
+    // The game updates enemy transforms once per game frame; the overlay
+    // samples them at the display rate. Rendering the latest sample gives
+    // stepping whenever the two rates differ (90 fps game vs 120/144 Hz
+    // overlay beats at 30 Hz). Keep the last two distinct samples and render
+    // the position one update interval in the past, interpolated between
+    // them: constant one-game-frame delay (4 cm at running speed), no steps.
+    struct motion_sample { Vector3 feet{}; Vector3 head{}; long long t_us{0}; };
+    struct motion_state {
+        motion_sample prev{}, cur{};
+        bool has_prev{false}, has_cur{false};
+        double interval_us{8333.0};
+    };
+    std::unordered_map<uint64_t, motion_state> g_motion;
+
+    float vdist(const Vector3& a, const Vector3& b) {
+        const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    void motion_update(motion_state& m, const Vector3& feet, const Vector3& head, long long t_us) {
+        if (!m.has_cur) {
+            m.cur = {feet, head, t_us};
+            m.has_cur = true;
+            return;
+        }
+        if (vdist(feet, m.cur.feet) < 0.0005f && vdist(head, m.cur.head) < 0.0005f) return; // game frame not advanced
+        const double dt = double(t_us - m.cur.t_us);
+        m.prev = m.cur;
+        m.has_prev = true;
+        m.cur = {feet, head, t_us};
+        if (dt > 2000.0 && dt < 60000.0) m.interval_us = m.interval_us * 0.8 + dt * 0.2;
+    }
+
+    void motion_render(const motion_state& m, long long now_us, Vector3& feet, Vector3& head) {
+        feet = m.cur.feet;
+        head = m.cur.head;
+        if (!m.has_prev) return;
+        const double span = double(m.cur.t_us - m.prev.t_us);
+        if (span <= 0.0 || span > 150000.0) return;            // stale pair: snap
+        if (vdist(m.prev.feet, m.cur.feet) > 4.f) return;         // teleport / respawn: snap
+        const double delay = std::clamp(m.interval_us, 4000.0, 34000.0);
+        double alpha = (double(now_us - m.prev.t_us) - delay) / span;
+        alpha = std::clamp(alpha, 0.0, 1.0);
+        const float a = float(alpha);
+        feet = m.prev.feet + (m.cur.feet - m.prev.feet) * a;
+        head = m.prev.head + (m.cur.head - m.prev.head) * a;
+    }
 }
 
 void visuals::draw() {
@@ -48,47 +98,54 @@ void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
-    const std::vector<uint64_t> Players = players();
+    const std::vector<player_snapshot> Players = players();
     if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
     const long long now_ms = diag::now_ms();
+    const long long now_us = diag::now_us();
 
     // Per-object caches must not outlive the match: a new match reuses heap
     // addresses, and a stale "dead since" entry would hide a live player.
     if (now_ms - g_last_purge > 1000) {
         g_last_purge = now_ms;
-        std::unordered_set<uint64_t> live(Players.begin(), Players.end());
+        std::unordered_set<uint64_t> live;
+        for (const player_snapshot& p : Players) live.insert(p.object);
         purge_missing(g_name_cache, live);
         purge_missing(g_dead_since, live);
         purge_missing(g_last_hp, live);
+        purge_missing(g_motion, live);
+        purge_missing(player::g_transform_cache, live);
     }
 
-    // Resolve at most one name per frame. Name discovery touches several
-    // component objects, so batching all ten players caused visible UI stalls.
-    if (cfg::esp::name) {
-        const uint64_t object = Players[g_name_cursor++ % Players.size()];
-        const uint32_t id = rpm<uint32_t>(object + v100::net_object_id);
-        name_cache_entry& entry = g_name_cache[object];
-        if (entry.id != id || now_ms - entry.refreshed > 5000) {
-            entry.id = id;
-            entry.name = player_name(object);
+    // Resolve at most one name per 100 ms. Name discovery touches several
+    // component objects (dozens of reads); it has no business in a 120 Hz loop.
+    if (cfg::esp::name && now_us - g_last_name_us > 100000) {
+        g_last_name_us = now_us;
+        const player_snapshot& p = Players[g_name_cursor++ % Players.size()];
+        name_cache_entry& entry = g_name_cache[p.object];
+        if (entry.id != p.id || now_ms - entry.refreshed > 5000) {
+            entry.id = p.id;
+            entry.name = player_name(p.object);
             entry.refreshed = now_ms;
         }
     }
 
-    uint64_t LocalPlayer = 0;
-    for (uint64_t p : Players) if (player::local(p)) { LocalPlayer = p; break; }
-    if (!LocalPlayer) { esp_wait("local player flag"); return; }
-    const int LocalTeam = player::team(LocalPlayer);
+    const player_snapshot* Local = nullptr;
+    for (const player_snapshot& p : Players) if (p.is_local()) { Local = &p; break; }
+    if (!Local) { esp_wait("local player flag"); return; }
+    const uint64_t LocalPlayer = Local->object;
+    const int LocalTeam = Local->team;
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
-    const player::PlayerPose LocalPose = player::pose(LocalPlayer);
+    const player::PlayerPose LocalPose = player::pose(*Local);
     const Vector3 LocalPosition = LocalPose.feet;
     if (!LocalPose.valid || !std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
         esp_wait("local transform hierarchy"); return;
     }
 
-    // Camera first: with the controller chain this is a handful of reads, so
-    // the player poses read right after it belong to the same game frame.
+    // Camera first (4 reads with a lock), then the enemy poses, then the
+    // camera again: if it changed in between, the game rendered a frame
+    // while we were reading and the poses are re-read so that box and
+    // camera describe the same frame.
     cam::main_chain chain{};
     std::vector<camera_candidate> Cameras = cam::resolve(LocalPlayer, chain);
     if (Cameras.empty()) { g_camera = 0; esp_wait("camera resolution (controller / bor / transform)"); return; }
@@ -96,6 +153,7 @@ void visuals::draw() {
     int enemies = 0, alive = 0, positioned = 0, projected = 0;
     struct enemy_frame {
         uint64_t object{};
+        const player_snapshot* snap{nullptr};
         Vector3 position{};
         Vector3 head{};
         bool has_head{false};
@@ -104,25 +162,33 @@ void visuals::draw() {
         float distance{0.f};
     };
     std::vector<enemy_frame> frame_enemies;
-    for (uint64_t Player : Players) {
-        if (!Player || Player == LocalPlayer) continue;
-        const int PlayerTeam = player::team(Player);
+    auto read_enemy_pose = [&](enemy_frame& e) -> bool {
+        const player::PlayerPose Shape = player::pose(*e.snap);
+        if (!Shape.valid) return false;
+        e.position = Shape.feet;
+        e.head = Shape.has_head ? Shape.head : Shape.feet + Vector3(0.f, 1.67f, 0.f);
+        e.has_head = Shape.has_head;
+        return true;
+    };
+    for (const player_snapshot& p : Players) {
+        if (p.object == LocalPlayer) continue;
+        const int PlayerTeam = p.team;
         if (PlayerTeam == LocalTeam || (PlayerTeam != 1 && PlayerTeam != 2)) continue;
         ++enemies;
 
-        const player::HealthInfo Health = player::health_info(Player);
+        const player::HealthInfo Health = player::health_info(p);
         const int hp_now = Health.valid ? Health.hp : -1;
-        const auto hp_prev = g_last_hp.find(Player);
+        const auto hp_prev = g_last_hp.find(p.object);
         if (hp_prev == g_last_hp.end() || hp_prev->second != hp_now) {
             diag::log("HEALTH", "object=0x%llx hp=%d max=%d valid=%d",
-                      (unsigned long long)Player, Health.hp, Health.max_hp, Health.valid ? 1 : 0);
-            g_last_hp[Player] = hp_now;
+                      (unsigned long long)p.object, Health.hp, Health.max_hp, Health.valid ? 1 : 0);
+            g_last_hp[p.object] = hp_now;
         }
         if (!Health.valid || Health.hp <= 0) {
-            g_dead_since[Player] = now_ms;
+            g_dead_since[p.object] = now_ms;
             continue;
         }
-        const auto dead = g_dead_since.find(Player);
+        const auto dead = g_dead_since.find(p.object);
         if (dead != g_dead_since.end()) {
             // Hide a dead body for a short grace period even if its stats
             // object briefly reports the pre-death HP again.
@@ -131,13 +197,41 @@ void visuals::draw() {
         }
         ++alive;
 
-        const player::PlayerPose Shape = player::pose(Player);
-        if (!Shape.valid) continue;
+        enemy_frame e{};
+        e.object = p.object;
+        e.snap = &p;
+        e.hp = Health.hp;
+        e.max_hp = Health.max_hp;
+        if (!read_enemy_pose(e)) continue;
         ++positioned;
-        const float Distance = calculate_distance(Shape.feet, LocalPosition);
-        if (Distance > 500.f) continue;
-        frame_enemies.push_back({Player, Shape.feet, Shape.has_head ? Shape.head : Shape.feet + Vector3(0.f, 1.67f, 0.f),
-                                 Shape.has_head, Health.hp, Health.max_hp, Distance});
+        e.distance = calculate_distance(e.position, LocalPosition);
+        if (e.distance > 500.f) continue;
+        frame_enemies.push_back(e);
+    }
+
+    // Straddle check against the locked native camera.
+    if (!Cameras.empty() && Cameras.front().kind == camera_kind_main_native && !frame_enemies.empty()) {
+        matrix view_after{}, proj_after{};
+        if (cam::reread_lock(view_after, proj_after) &&
+            std::memcmp(&view_after, &Cameras.front().view, sizeof(matrix)) != 0) {
+            static long long straddle_log = 0;
+            static unsigned straddles = 0;
+            ++straddles;
+            for (enemy_frame& e : frame_enemies) read_enemy_pose(e);
+            Cameras.front().view = view_after;
+            Cameras.front().projection = proj_after;
+            if (diag::every(straddle_log, 10000))
+                diag::log("CAMERA", "frame straddle re-reads so far: %u", straddles);
+        }
+    }
+
+    // Feed the interpolator with the (consistent) samples and replace the
+    // rendered positions by the interpolated ones.
+    const long long sample_us = diag::now_us();
+    for (enemy_frame& e : frame_enemies) {
+        motion_state& m = g_motion[e.object];
+        motion_update(m, e.position, e.head, sample_us);
+        if (cfg::esp::smooth) motion_render(m, sample_us, e.position, e.head);
     }
 
     // Camera selection. The controller camera whose bor is

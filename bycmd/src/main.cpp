@@ -144,8 +144,12 @@ int main(int argc, char** argv) {
     g_sw = static_cast<float>(max_size);
     g_sh = static_cast<float>(min_size);
 
+    // Landscape-sized surface (e.g. 2720x1224) instead of the template's
+    // max x max square (2720x2720): halves the pixels the GPU clears/blends
+    // and SurfaceFlinger composites every frame. ESP only runs in landscape;
+    // in portrait the right part of the overlay is simply off-screen.
     native_window_screen_x = max_size;
-    native_window_screen_y = max_size;
+    native_window_screen_y = min_size;
 
     diag::log("INFO", "display width=%d height=%d orientation=%d overlay=%dx%d",
               displayInfo.width, displayInfo.height, displayInfo.orientation,
@@ -197,11 +201,18 @@ int main(int argc, char** argv) {
     // vsync in steady state. Sleeping most of the period and reading the
     // game memory as late as possible makes the boxes use coordinates that
     // are only a few ms old when SurfaceFlinger composes the frame.
-    double period_ms = 16.6, work_ms = 4.0;
-    long long last_swap = diag::now_ms();
+    double period_ms = 8.3, work_ms = 2.0, margin_ms = 2.5;
+    long long last_swap_us = diag::now_us();
+    unsigned frames = 0, missed = 0;
+    long long last_pace_report = diag::now_ms();
+    // Display period = median of the last 32 swap intervals (robust against
+    // missed vsyncs and against a wrong initial guess on 60/90/144 Hz panels).
+    double periods[32] = {0};
+    unsigned period_index = 0;
+    bool periods_full = false;
 
     while (!g_quit) {
-        const long long frame_start = diag::now_ms();
+        const long long frame_start_us = diag::now_us();
         drawBegin();
 
         bool run = game::valid();
@@ -264,18 +275,45 @@ int main(int argc, char** argv) {
             }
         }
 
-        const long long before_swap = diag::now_ms();
+        const long long before_swap_us = diag::now_us();
         drawEnd();
-        const long long after_swap = diag::now_ms();
+        const long long after_swap_us = diag::now_us();
 
-        work_ms = work_ms * 0.9 + double(before_swap - frame_start) * 0.1;
-        const double swap_period = double(after_swap - last_swap);
-        last_swap = after_swap;
-        if (swap_period > 3.0 && swap_period < 50.0) period_ms = period_ms * 0.9 + swap_period * 0.1;
-        double sleep_ms = period_ms - work_ms - 2.5;
+        // eglSwapBuffers returns once the previous buffer was consumed at a
+        // vsync, so the interval between returns is the display period
+        // (8.3 ms at 120 Hz, 6.9 ms at 144 Hz). Sleep period - work - margin
+        // and read the game as late as possible; the margin adapts to the
+        // observed miss rate (a return after > 1.6 periods == missed vsync).
+        work_ms = work_ms * 0.9 + double(before_swap_us - frame_start_us) / 1000.0 * 0.1;
+        const double swap_period = double(after_swap_us - last_swap_us) / 1000.0;
+        last_swap_us = after_swap_us;
+        ++frames;
+        if (swap_period > 2.0 && swap_period < 50.0) {
+            if (swap_period > period_ms * 1.6 && run) ++missed;
+            periods[period_index] = swap_period;
+            period_index = (period_index + 1) % 32;
+            if (period_index == 0) periods_full = true;
+            if (periods_full && period_index % 8 == 0) {
+                double sorted[32];
+                std::memcpy(sorted, periods, sizeof(sorted));
+                std::sort(sorted, sorted + 32);
+                period_ms = sorted[15];
+            }
+        }
+        if (diag::now_ms() - last_pace_report > 2000) {
+            const double miss_rate = frames ? double(missed) / double(frames) : 0.0;
+            if (miss_rate > 0.03) margin_ms = std::min(5.0, margin_ms + 0.5);
+            else if (miss_rate < 0.005) margin_ms = std::max(1.5, margin_ms - 0.1);
+            static long long pace_log = 0;
+            if (run && diag::every(pace_log, 10000))
+                diag::log("PACE", "period=%.2fms work=%.2fms margin=%.1fms missed=%u/%u", period_ms, work_ms, margin_ms, missed, frames);
+            frames = missed = 0;
+            last_pace_report = diag::now_ms();
+        }
+        double sleep_ms = period_ms - work_ms - margin_ms;
         if (ui::bar::g_open) sleep_ms = std::min(sleep_ms, 2.0);
         if (!run) sleep_ms = std::max(sleep_ms, 8.0);
-        if (sleep_ms > 0.5) usleep(useconds_t(sleep_ms * 1000.0));
+        if (sleep_ms > 0.3) usleep(useconds_t(sleep_ms * 1000.0));
     }
 
     diag::log("INFO", "shutting down");

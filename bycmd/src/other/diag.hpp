@@ -30,6 +30,11 @@ inline long long now_ms() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+inline long long now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 inline bool every(long long& last, long long interval_ms) {
     const long long now = now_ms();
     if (now - last < interval_ms) return false;

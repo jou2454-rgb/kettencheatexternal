@@ -422,4 +422,150 @@ namespace player {
         const HealthInfo info = health_info(p);
         return info.valid ? info.hp : 0;
     }
+
+    // ---- snapshot-based fast path -------------------------------------
+    // The per-frame cost of pose() is dominated by re-resolving pointers
+    // that do not change between frames: mtc -> Transform -> m_CachedPtr ->
+    // TransformHierarchy {data, index, entries, parents}. Cache them per
+    // player, revalidate twice a second, and read only the hierarchy entries
+    // every frame (1 read + 2 per parent level per transform).
+    struct hierarchy_ref {
+        uint64_t native{0};
+        uint64_t entries{0};
+        uint64_t parents{0};
+        int index{-1};
+        bool valid{false};
+    };
+    struct transform_cache_entry {
+        uint64_t mtc{0};
+        hierarchy_ref refs[2];
+        int count{0};
+        long long validated_us{0};
+        Vector3 last_feet{};
+        bool has_last{false};
+    };
+    inline std::unordered_map<uint64_t, transform_cache_entry> g_transform_cache;
+
+    inline bool resolve_hierarchy(uint64_t managed, hierarchy_ref& ref) noexcept {
+        ref = {};
+        if (!obj_ptr(managed)) return false;
+        const uint64_t native = rpm<uint64_t>(managed + v100::unity_cached_ptr);
+        if (!obj_ptr(native)) return false;
+        if (g_transform_layout.pid != proc::pid || g_transform_layout.data_offset < 0) {
+            Vector3 probe{};
+            if (!native_transform_position(native, probe)) return false; // runs the layout probe
+        }
+        const auto& layout = g_transform_layout;
+        const uint64_t data = rpm<uint64_t>(native + uint64_t(layout.data_offset));
+        const int index = rpm<int>(native + uint64_t(layout.index_offset));
+        if (!plausible(data) || index < 0 || index > 8192) return false;
+        const uint64_t entries = rpm<uint64_t>(data + uint64_t(layout.entries_offset));
+        const uint64_t parents = rpm<uint64_t>(data + uint64_t(layout.parents_offset));
+        if (!plausible(entries) || !plausible(parents) || entries == parents) return false;
+        ref.native = native;
+        ref.entries = entries;
+        ref.parents = parents;
+        ref.index = index;
+        ref.valid = true;
+        return true;
+    }
+
+    inline bool hierarchy_position(const hierarchy_ref& ref, Vector3& out) noexcept {
+        if (!ref.valid) return false;
+        TransformEntry current{};
+        if (!mem_read(ref.entries + uint64_t(ref.index) * sizeof(TransformEntry), &current, sizeof(current)) ||
+            !entry_valid(current)) return false;
+        Vector3 result(current.position.x, current.position.y, current.position.z);
+        int parent = rpm<int>(ref.parents + uint64_t(ref.index) * sizeof(int));
+        int guard = 0;
+        while (parent >= 0 && parent <= 8192 && guard++ < 128) {
+            TransformEntry entry{};
+            if (!mem_read(ref.entries + uint64_t(parent) * sizeof(TransformEntry), &entry, sizeof(entry)) ||
+                !entry_valid(entry)) return false;
+            Vector3 scaled(result.x * entry.scale.x, result.y * entry.scale.y, result.z * entry.scale.z);
+            result = rotate(entry.rotation, scaled) + Vector3(entry.position.x, entry.position.y, entry.position.z);
+            const int next = rpm<int>(ref.parents + uint64_t(parent) * sizeof(int));
+            if (next == parent) return false;
+            parent = next;
+        }
+        if (guard >= 128 || parent < -1 || !std::isfinite(result.x) || !std::isfinite(result.y) ||
+            !std::isfinite(result.z) || std::fabs(result.x) > 100000.f ||
+            std::fabs(result.y) > 100000.f || std::fabs(result.z) > 100000.f) return false;
+        out = result;
+        return true;
+    }
+
+    inline void forget(uint64_t object) { g_transform_cache.erase(object); }
+
+    inline bool revalidate(const player_snapshot& p, transform_cache_entry& entry) noexcept {
+        entry.count = 0;
+        entry.mtc = p.transform;
+        entry.validated_us = diag::now_us();
+        const uint64_t transforms_class = typeinfo(v100::transforms_typeinfo);
+        if (!transforms_class || !exact_class(p.transform, transforms_class)) return false;
+        uint64_t pair[2]{};
+        if (!mem_read(p.transform + v100::transform_a, pair, sizeof(pair))) return false;
+        for (uint64_t managed : pair) {
+            if (!obj_ptr(managed)) continue;
+            if (entry.count && entry.refs[0].native && rpm<uint64_t>(managed + v100::unity_cached_ptr) == entry.refs[0].native) continue;
+            if (resolve_hierarchy(managed, entry.refs[entry.count])) ++entry.count;
+        }
+        return entry.count > 0;
+    }
+
+    inline PlayerPose pose(const player_snapshot& p) noexcept {
+        PlayerPose out{};
+        if (!obj_ptr(p.transform)) { forget(p.object); return out; } // despawned / dead NetObject
+        transform_cache_entry& entry = g_transform_cache[p.object];
+        const long long now = diag::now_us();
+        if (entry.mtc != p.transform || now - entry.validated_us > 500000)
+            revalidate(p, entry);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool found = false;
+            float min_y = 1.0e30f, max_y = -1.0e30f;
+            Vector3 min_point{}, max_point{};
+            for (int i = 0; i < entry.count; ++i) {
+                Vector3 point{};
+                if (!hierarchy_position(entry.refs[i], point)) { found = false; break; }
+                if (std::fabs(point.x) < .001f && std::fabs(point.y) < .001f && std::fabs(point.z) < .001f) continue;
+                if (!found || point.y < min_y) { min_y = point.y; min_point = point; }
+                if (!found || point.y > max_y) { max_y = point.y; max_point = point; }
+                found = true;
+            }
+            // A hierarchy rebuild (index reuse) shows up as a teleport; re-resolve once.
+            const bool jump = found && entry.has_last &&
+                (std::fabs(min_point.x - entry.last_feet.x) > 12.f ||
+                 std::fabs(min_point.y - entry.last_feet.y) > 12.f ||
+                 std::fabs(min_point.z - entry.last_feet.z) > 12.f);
+            if (found && (!jump || attempt == 1)) {
+                out.feet = min_point;
+                out.head = max_point;
+                out.valid = true;
+                const float span = max_point.y - min_point.y;
+                out.has_head = span >= 0.35f && span <= 2.5f;
+                if (!out.has_head) out.head = min_point + Vector3(0.f, 1.67f, 0.f);
+                entry.last_feet = min_point;
+                entry.has_last = true;
+                return out;
+            }
+            if (!revalidate(p, entry)) break;
+        }
+        entry.has_last = false;
+        return out;
+    }
+
+    inline HealthInfo health_info(const player_snapshot& p) noexcept {
+        HealthInfo out{};
+        const uint64_t stats_class = typeinfo(v100::stats_typeinfo);
+        if (!stats_class || !exact_class(p.stats, stats_class)) return out;
+        uint16_t block[3]{};
+        if (!mem_read(p.stats + v100::stats_hp, block, sizeof(block))) return out;
+        const uint16_t hp = block[0];
+        const uint16_t max_hp = block[(v100::stats_max_hp - v100::stats_hp) / 2];
+        if (max_hp == 0 || max_hp > 1000 || max_hp == 0xFFFFU || hp == 0xFFFFU || hp > max_hp) return out;
+        out.hp = int(hp);
+        out.max_hp = int(max_hp);
+        out.valid = true;
+        return out;
+    }
 }

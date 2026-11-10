@@ -24,6 +24,8 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 struct matrix {
     float m11, m12, m13, m14;
@@ -562,6 +564,9 @@ namespace scanner {
     }
 
     inline void loop() {
+        // Background priority: the scan must never steal a core from the game.
+        ::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 19);
+        unsigned idle_passes = 0; // passes that found nothing new while the registry is known
         while (g_run) {
             const int pid = proc::pid;
             const uint64_t lib = proc::lib;
@@ -588,17 +593,28 @@ namespace scanner {
             const long long since_pass = diag::now_ms() - last_pass;
             // A pass is worth its CPU only while something is still missing:
             // the registry (before/after a match) or a camera for the
-            // resolver. Once everything is locked the thread idles.
+            // resolver. Once everything is locked the thread idles. Inside a
+            // match (registry known) repeated fruitless passes back off up to
+            // two minutes so a layout mismatch does not cost a 4 GiB scan
+            // every 15 s while the player is in a round.
+            const bool registry_known = !essential_missing || g_results.registry != 0;
+            long long interval = 15000;
+            if (registry_known && idle_passes > 0) interval = std::min<long long>(120000, 15000LL << std::min<unsigned>(idle_passes, 3));
             const bool due = (g_rescan && since_pass > 3000) ||
-                             ((essential_missing || g_want_more) && since_pass > 15000);
+                             ((essential_missing || g_want_more) && since_pass > interval);
             if (!due) {
                 sleep_ms(100);
                 continue;
             }
+            const bool wanted_more = g_want_more;
             g_rescan = false;
             g_busy = true;
             pass(pid, lib);
             g_busy = false;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_results.registry && wanted_more) ++idle_passes; else idle_passes = 0;
+            }
             sleep_ms(3000);
         }
     }
@@ -631,29 +647,12 @@ inline void cache_player(uint64_t object, uint32_t id, long long now) {
     else { found->object = object; found->seen_ms = now; }
 }
 
-inline int resolve_local_flag(const std::vector<uint64_t>& objects) {
-    if (objects.empty()) return g_local_flag_offset;
-    for (int offset : {0x44, 0x45, 0x46}) {
-        int true_count = 0;
-        for (uint64_t object : objects) {
-            if (rpm<uint8_t>(object + uint64_t(offset)) != 0) ++true_count;
-        }
-        // A live match has exactly one local NetObject. If a flag is true for
-        // zero or several objects it is IsServer/IsLocalOwned, not IsLocal.
-        if (true_count == 1) {
-            if (g_local_flag_offset != offset) {
-                diag::log("INFO", "local NetObject flag resolved at +0x%x (old +0x%x)",
-                          offset, g_local_flag_offset);
-                g_local_flag_offset = offset;
-            }
-            return offset;
-        }
-    }
-    return g_local_flag_offset;
-}
-
 inline bool registry_ready() {
     ensure_scan_context();
+    // The registry pointer is revalidated (5 reads) four times a second;
+    // players() still checks count/array on every frame.
+    static long long last_validation = 0;
+    if (g_registry && !diag::every(last_validation, 250)) return true;
     const uint64_t registry_class = typeinfo(v100::registry_typeinfo);
     const uint64_t store_class = typeinfo(v100::store_typeinfo);
     static long long type_log = 0;
@@ -681,8 +680,62 @@ inline bool registry_ready() {
     return false;
 }
 
-inline std::vector<uint64_t> players() {
-    std::vector<uint64_t> out;
+// One block read per NetObject (odq): wwv header, flags, mtc/ydm/vqn pointers
+// and the team byte. Everything the frame needs from the player object itself.
+struct player_snapshot {
+    uint64_t object{0};
+    uint32_t id{0};
+    uint64_t world{0};
+    uint8_t flags[3]{0, 0, 0};   // +0x44 +0x45 +0x46
+    uint64_t transform{0};       // odq+0x68 mtc
+    uint64_t stats{0};           // odq+0x70 ydm
+    uint64_t camera_state{0};    // odq+0x78 vqn
+    uint8_t view_mode{0};        // odq+0x80 dvp
+    uint8_t team{0};             // odq+0x90
+    bool is_local() const { return flags[g_local_flag_offset - int(v100::player_local)] != 0; }
+};
+
+inline bool read_player_snapshot(uint64_t object, uint64_t player_class, player_snapshot& out) {
+    if (!obj_ptr(object)) return false;
+    uint8_t block[0x98]{};
+    if (!mem_read(object, block, sizeof(block))) return false;
+    uint64_t klass = 0;
+    std::memcpy(&klass, block, 8);
+    if (klass != player_class) return false;
+    out.object = object;
+    std::memcpy(&out.id, block + v100::net_object_id, 4);
+    std::memcpy(&out.world, block + v100::player_world, 8);
+    std::memcpy(out.flags, block + v100::player_local, 3);
+    std::memcpy(&out.transform, block + v100::player_transform, 8);
+    std::memcpy(&out.stats, block + v100::player_stats, 8);
+    std::memcpy(&out.camera_state, block + v100::player_camera_state, 8);
+    out.view_mode = block[v100::player_view_mode];
+    out.team = block[v100::player_team];
+    return out.world != 0;
+}
+
+inline int resolve_local_flag(const std::vector<player_snapshot>& objects) {
+    if (objects.empty()) return g_local_flag_offset;
+    for (int offset : {0x44, 0x45, 0x46}) {
+        int true_count = 0;
+        for (const player_snapshot& p : objects)
+            if (p.flags[offset - 0x44] != 0) ++true_count;
+        // A live match has exactly one local NetObject. If a flag is true for
+        // zero or several objects it is IsServer/IsLocalOwned, not IsLocal.
+        if (true_count == 1) {
+            if (g_local_flag_offset != offset) {
+                diag::log("INFO", "local NetObject flag resolved at +0x%x (old +0x%x)",
+                          offset, g_local_flag_offset);
+                g_local_flag_offset = offset;
+            }
+            return offset;
+        }
+    }
+    return g_local_flag_offset;
+}
+
+inline std::vector<player_snapshot> players() {
+    std::vector<player_snapshot> out;
     if (!registry_ready()) return out;
     const uint64_t player_class = typeinfo(v100::player_typeinfo);
     uint64_t store = rpm<uint64_t>(g_registry + v100::registry_store);
@@ -699,46 +752,42 @@ inline std::vector<uint64_t> players() {
     const long long now = diag::now_ms();
     size_t raw_exact = 0;
     uint64_t active_world = 0;
-    std::vector<uint64_t> current_objects;
+    std::vector<player_snapshot> current;
     std::vector<uint64_t> items(size_t(count), 0);
     if (count > 0 && !mem_read(array + v100::array_data, items.data(), items.size() * 8)) return out;
     for (int i = 0; i < count; ++i) {
-        const uint64_t object = items[size_t(i)];
-        if (!obj_ptr(object)) continue;
-        // One read per NetObject: klass, id, world and the three flag bytes.
-        uint8_t head[0x48]{};
-        if (!mem_read(object, head, sizeof(head))) continue;
-        uint64_t klass = 0, world = 0;
-        uint32_t id = 0;
-        std::memcpy(&klass, head, 8);
-        std::memcpy(&id, head + v100::net_object_id, 4);
-        std::memcpy(&world, head + v100::player_world, 8);
-        if (klass != player_class || !world) continue;
+        player_snapshot snap{};
+        if (!read_player_snapshot(items[size_t(i)], player_class, snap)) continue;
         ++raw_exact;
-        current_objects.push_back(object);
-        if (!active_world || head[g_local_flag_offset]) active_world = world;
-        cache_player(object, id, now);
+        if (!active_world || snap.is_local()) active_world = snap.world;
+        cache_player(snap.object, snap.id, now);
+        current.push_back(snap);
     }
-    g_player_cache.erase(std::remove_if(g_player_cache.begin(), g_player_cache.end(),
-        [now, player_class, active_world](const player_cache_entry& entry) {
-            return now - entry.seen_ms > 2500 || !exact_class(entry.object, player_class) ||
-                   !rpm<uint64_t>(entry.object + v100::player_world) ||
-                   (active_world && rpm<uint64_t>(entry.object + v100::player_world) != active_world);
-        }), g_player_cache.end());
-    auto append_unique = [&out](uint64_t object) {
-        if (object && std::find(out.begin(), out.end(), object) == out.end()) out.push_back(object);
-    };
-    for (uint64_t object : current_objects) {
+    // Cache validation costs three reads per entry; once every 500 ms is enough.
+    static long long last_cache_check = 0;
+    if (diag::every(last_cache_check, 500)) {
+        g_player_cache.erase(std::remove_if(g_player_cache.begin(), g_player_cache.end(),
+            [now, player_class, active_world](const player_cache_entry& entry) {
+                return now - entry.seen_ms > 2500 || !exact_class(entry.object, player_class) ||
+                       !rpm<uint64_t>(entry.object + v100::player_world) ||
+                       (active_world && rpm<uint64_t>(entry.object + v100::player_world) != active_world);
+            }), g_player_cache.end());
+    }
+    for (const player_snapshot& snap : current) {
         if (out.size() >= 10) break;
-        append_unique(object);
+        out.push_back(snap);
     }
     // A dead player disappears from the registry but can remain in the cache
     // for a couple of seconds, still carrying the last pre-death stats. Once
     // the registry has a real match snapshot, do not resurrect cache-only objects.
-    if (current_objects.size() < 2) {
+    if (current.size() < 2) {
         for (const auto& entry : g_player_cache) {
             if (out.size() >= 10) break;
-            append_unique(entry.object);
+            bool present = false;
+            for (const player_snapshot& snap : out) if (snap.object == entry.object) { present = true; break; }
+            if (present) continue;
+            player_snapshot snap{};
+            if (read_player_snapshot(entry.object, player_class, snap)) out.push_back(snap);
         }
     }
     if (!out.empty()) resolve_local_flag(out);

@@ -69,6 +69,8 @@ namespace ui::menu {
         separator(a);
         combo("Box type", &cfg::esp::box_type, {"Full", "Corner"}, a);
         separator(a);
+        checkbox("Smooth motion", &cfg::esp::smooth, a);
+        separator(a);
         slider("Box rounding", &cfg::esp::box_rounding, 0.f, 10.f, a, "%.0f");
         separator(a);
         colorpick("Box color", &cfg::esp::box_col, a);

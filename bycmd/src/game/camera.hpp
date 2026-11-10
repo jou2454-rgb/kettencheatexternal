@@ -67,6 +67,7 @@ namespace cam {
         g_lock = {};
         g_chain_player = 0;
         g_chain_presentation = 0;
+        player::g_transform_cache.clear();
     }
 
     inline Vector3 position_from_view(const matrix& m) {
@@ -251,13 +252,25 @@ namespace cam {
         return true;
     }
 
-    // Validate the lock and re-read its matrices: 4-5 reads per frame.
-    inline bool refresh_lock(const main_chain& chain, const bor_pose& pose, camera_candidate& candidate) {
+    inline uint64_t g_lock_camera_class = 0;
+    inline long long g_last_bor_check = 0;
+
+    // Re-read the locked matrices only (2 reads). Used by the straddle check
+    // in visuals: if the camera advanced while player poses were being read,
+    // the poses are re-read so box and camera come from the same game frame.
+    inline bool reread_lock(matrix& view, matrix& projection) {
+        if (!g_lock.managed || g_lock.pid != proc::pid) return false;
+        return read_matrix_pair(g_lock.native, g_lock.view_off, g_lock.proj_off, view, projection);
+    }
+
+    // Validate the lock and re-read its matrices: 4 reads per frame
+    // (wrapper klass, m_CachedPtr, view, projection); bor divergence check
+    // every 250 ms.
+    inline bool refresh_lock(const main_chain& chain, camera_candidate& candidate) {
         if (g_lock.pid != proc::pid) g_lock = {};
         if (!g_lock.managed) return false;
-        const uint64_t camera_class = typeinfo(v100::camera_typeinfo);
         uint64_t native = 0;
-        if (!camera_class || !managed_to_native(g_lock.managed, camera_class, native) || native != g_lock.native ||
+        if (!g_lock_camera_class || !managed_to_native(g_lock.managed, g_lock_camera_class, native) || native != g_lock.native ||
             !read_matrix_pair(native, g_lock.view_off, g_lock.proj_off, candidate.view, candidate.projection)) {
             diag::log("CAMERA", "camera lock lost managed=0x%llx native=0x%llx (wrapper/native/matrices invalid)",
                       (unsigned long long)g_lock.managed, (unsigned long long)g_lock.native);
@@ -265,31 +278,34 @@ namespace cam {
             scanner::request_rescan();
             return false;
         }
-        if (pose.valid) {
-            const float d = distance(position_from_view(candidate.view), pose.position);
-            if (d > 3.0f) {
-                if (++g_lock.mismatch_frames > 90) {
-                    diag::log("CAMERA", "camera lock dropped: native camera %.1f m away from MainCamera bor for %d frames",
-                              d, g_lock.mismatch_frames);
-                    g_lock = {};
-                    scanner::request_rescan();
-                    return false;
+        if (diag::every(g_last_bor_check, 250)) {
+            const bor_pose pose = read_bor(chain.main_bor);
+            if (pose.valid) {
+                const float d = distance(position_from_view(candidate.view), pose.position);
+                if (d > 3.0f) {
+                    // ~90 frames at 250 ms checks == 22 s was too slow; 8 checks == 2 s.
+                    if (++g_lock.mismatch_frames > 8) {
+                        diag::log("CAMERA", "camera lock dropped: native camera %.1f m away from MainCamera bor for %d checks",
+                                  d, g_lock.mismatch_frames);
+                        g_lock = {};
+                        scanner::request_rescan();
+                        return false;
+                    }
+                } else {
+                    g_lock.mismatch_frames = 0;
                 }
-            } else {
-                g_lock.mismatch_frames = 0;
+                if (diag::every(g_last_lock_log, 5000)) {
+                    const projection_info info = projection_params(candidate.projection);
+                    diag::log("CAMERA", "locked native=0x%llx fov=%.1f aspect=%.2f near=%.2f far=%.0f borFov=%.1f borDist=%.2f",
+                              (unsigned long long)native, info.fov, info.aspect, info.near_plane, info.far_plane,
+                              pose.fov, d);
+                }
             }
         }
         candidate.address = native;
         candidate.view_off = g_lock.view_off;
         candidate.proj_off = g_lock.proj_off;
         candidate.kind = g_lock.kind;
-        (void)chain;
-        if (diag::every(g_last_lock_log, 5000)) {
-            const projection_info info = projection_params(candidate.projection);
-            diag::log("CAMERA", "locked native=0x%llx fov=%.1f aspect=%.2f near=%.2f far=%.0f borFov=%.1f borDist=%.2f",
-                      (unsigned long long)native, info.fov, info.aspect, info.near_plane, info.far_plane,
-                      pose.fov, pose.valid ? distance(position_from_view(candidate.view), pose.position) : -1.f);
-        }
         return true;
     }
 
@@ -348,6 +364,7 @@ namespace cam {
             return false;
         }
         g_lock = {best.managed, best.native, best.view_off, best.proj_off, camera_kind_main_native, proc::pid, 0, now};
+        g_lock_camera_class = camera_class;
         diag::log("CAMERA", "camera locked managed=0x%llx native=0x%llx view=+0x%x proj=+0x%x fov=%.1f far=%.0f (matched=%d of %d)",
                   (unsigned long long)best.managed, (unsigned long long)best.native, best.view_off, best.proj_off,
                   best.info.fov, best.info.far_plane, matched, probed);
@@ -364,10 +381,15 @@ namespace cam {
     inline std::vector<camera_candidate> resolve(uint64_t local_player, main_chain& chain) {
         std::vector<camera_candidate> out;
         chain = resolve_chain(local_player);
-        const bor_pose pose = read_bor(chain.main_bor);
 
         camera_candidate native{};
-        if (refresh_lock(chain, pose, native) || acquire_lock(chain, pose, native)) {
+        if (refresh_lock(chain, native)) {
+            scanner::g_want_more = false;
+            out.push_back(native);
+            return out;
+        }
+        const bor_pose pose = read_bor(chain.main_bor);
+        if (acquire_lock(chain, pose, native)) {
             scanner::g_want_more = false;
             out.push_back(native);
             return out;

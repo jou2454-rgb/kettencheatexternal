@@ -157,12 +157,24 @@ void drawBegin() {
     ImGui::NewFrame();
 }
 
+unsigned g_swap_failures = 0;
+unsigned g_swap_consecutive_failures = 0;
+unsigned g_swap_last_error = 0;
+
 void drawEnd() {
     if (display == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT) return;
     ImGui::Render();
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    eglSwapBuffers(display, surface);
+    if (eglSwapBuffers(display, surface) == EGL_TRUE) {
+        g_swap_consecutive_failures = 0;
+    } else {
+        // Lost surface/context (display reconfiguration). main() restarts the
+        // overlay through the supervisor once this persists.
+        ++g_swap_failures;
+        ++g_swap_consecutive_failures;
+        g_swap_last_error = unsigned(eglGetError());
+    }
 }
 
 void shutdown() {

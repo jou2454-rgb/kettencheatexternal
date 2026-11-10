@@ -11,6 +11,7 @@
 
 #include "../other/memory.hpp"
 #include "../other/status.hpp"
+#include "../other/crash.hpp"
 #include "../protect/oxorany.hpp"
 #include <stdint.h>
 #include <vector>
@@ -611,6 +612,7 @@ namespace scanner {
             g_busy = true;
             pass(pid, lib);
             g_busy = false;
+            (void)crash::g_frame; // the scanner thread shares the crash handler; its stage is implicit
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_results.registry && wanted_more) ++idle_passes; else idle_passes = 0;

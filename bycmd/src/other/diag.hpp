@@ -42,9 +42,9 @@ inline bool every(long long& last, long long interval_ms) {
     return true;
 }
 
-inline bool open_log(const char* path) {
+inline bool open_log(const char* path, bool truncate = true) {
     if (!path || !*path) return false;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
+    const int fd = ::open(path, O_WRONLY | O_CREAT | (truncate ? O_TRUNC : 0) | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     if (g_log_fd >= 0) ::close(g_log_fd);
     g_log_fd = fd;

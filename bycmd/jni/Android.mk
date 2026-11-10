@@ -46,14 +46,16 @@ LOCAL_CPPFLAGS := \
     -fno-color-diagnostics \
     -fmerge-all-constants \
     -fno-ident \
-    
+    -DBYCMD_BUILD_ID=\"$(if $(BYCMD_BUILD_ID),$(BYCMD_BUILD_ID),dev)\"
+
 
 # If you really want -fexceptions (very rare in size-optimized Android native code)
 # LOCAL_CPPFLAGS += -fexceptions
 
+# No --strip-all here: ndk-build strips the installed copy in libs/ anyway,
+# while obj/local/arm64-v8a/eeeww keeps symbols for crash-log symbolisation.
 LOCAL_LDFLAGS := \
     -Wl,--gc-sections \
-    -Wl,--strip-all \
     -Wl,--build-id=none \
     -Wl,--no-undefined \
     -pie \

@@ -44,6 +44,9 @@ extern ImFont* fontMedium;
 extern ImFont* fontDesc;
 extern ImFont* espFont;
 extern int native_window_screen_x, native_window_screen_y;
+extern unsigned g_swap_failures;             // total eglSwapBuffers failures
+extern unsigned g_swap_consecutive_failures; // failures since the last success
+extern unsigned g_swap_last_error;           // last eglGetError() after a failure
 
 bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log = false);
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log = false);

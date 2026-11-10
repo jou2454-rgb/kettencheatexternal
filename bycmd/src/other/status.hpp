@@ -8,11 +8,15 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <atomic>
 
 namespace status {
     inline char build[96] = "build: not checked";
     inline char camera[96] = "camera: none";
     inline char scan[96] = "scan: idle";
+    // Set by the menu's Exit button; the main loop shuts down cleanly
+    // (exit() from inside a frame raced the touch threads and ImGui teardown).
+    inline std::atomic<bool> g_quit_request{false};
 
     inline void set(char* slot, size_t size, const char* format, ...) {
         va_list args;

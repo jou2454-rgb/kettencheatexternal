@@ -160,7 +160,7 @@ namespace ui::menu {
         ImGui::PopFont();
 
         separator(a);
-        button("Exit", a, []() { exit(0); });
+        button("Exit", a, []() { status::g_quit_request = true; });
     }
 
     static void subtabs(ImDrawList* dl, ImVec2 amin, ImVec2 amax, float a) {
@@ -278,9 +278,11 @@ namespace ui::menu {
 
             ImGui::PushFont(fontDesc);
             time_t now = time(0);
-            tm* ltm = localtime(&now);
+            tm ltm_storage{};
+            tm* ltm = localtime_r(&now, &ltm_storage);
             char tb[32];
-            snprintf(tb, sizeof(tb), "%02d:%02d:%02d", ltm->tm_hour, ltm->tm_min, ltm->tm_sec);
+            if (ltm) snprintf(tb, sizeof(tb), "%02d:%02d:%02d", ltm->tm_hour, ltm->tm_min, ltm->tm_sec);
+            else snprintf(tb, sizeof(tb), "--:--:--");
             dl->AddText(ImVec2(wp.x + 10, wp.y + wsz.y - fh + (fh - fontDesc->FontSize) * 0.5f), col(clr::text_dim, ma), "Time");
             ImVec2 lsz = ImGui::CalcTextSize("Time ");
             dl->AddText(ImVec2(wp.x + 10 + lsz.x, wp.y + wsz.y - fh + (fh - fontDesc->FontSize) * 0.5f), col(clr::accent, ma), tb);

@@ -12,6 +12,7 @@
 #include "../game/camera.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
+#include "../other/crash.hpp"
 #include "../protect/oxorany.hpp"
 #include "imgui.h"
 #include <cmath>
@@ -98,6 +99,7 @@ void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
+    crash::stage("esp-players");
     const std::vector<player_snapshot> Players = players();
     if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
     const long long now_ms = diag::now_ms();
@@ -146,10 +148,12 @@ void visuals::draw() {
     // camera again: if it changed in between, the game rendered a frame
     // while we were reading and the poses are re-read so that box and
     // camera describe the same frame.
+    crash::stage("esp-camera");
     cam::main_chain chain{};
     std::vector<camera_candidate> Cameras = cam::resolve(LocalPlayer, chain);
     if (Cameras.empty()) { g_camera = 0; esp_wait("camera resolution (controller / bor / transform)"); return; }
 
+    crash::stage("esp-poses");
     int enemies = 0, alive = 0, positioned = 0, projected = 0;
     struct enemy_frame {
         uint64_t object{};
@@ -324,6 +328,7 @@ void visuals::draw() {
     g_camera = selected_camera;
     selected_kind_prev = selected_kind;
 
+    crash::stage("esp-draw");
     for (const auto& Enemy : frame_enemies) {
         ImVec2 ScreenHead, ScreenFoot;
         const bool HeadVisible = world_to_screen(Enemy.head, ViewMatrix, ProjectionMatrix, ScreenHead);

@@ -10,6 +10,7 @@
 #include "../game/math.hpp"
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
+#include "../game/triggerbot.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -96,7 +97,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::trigger::enabled;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -359,6 +360,24 @@ void visuals::draw() {
                 ? found->second.name.c_str() : "Enemy";
             dnick(label, BoxMax, cx, font_sz, 1.f);
         }
+    }
+    // Triggerbot: the crosshair (screen centre) inside an enemy's projected box.
+    triggerbot::load_once();
+    {
+        bool on_target = false;
+        if (cfg::trigger::enabled) {
+            const float cxs = g_sw * 0.5f, cys = g_sh * 0.5f;
+            for (const auto& Enemy : frame_enemies) {
+                ImVec2 hp, fp;
+                if (!world_to_screen(Enemy.head, ViewMatrix, ProjectionMatrix, hp) ||
+                    !world_to_screen(Enemy.position, ViewMatrix, ProjectionMatrix, fp)) continue;
+                const float top = fminf(hp.y, fp.y), bot = fmaxf(hp.y, fp.y);
+                const float half_w = (bot - top) * 0.21f;      // same box width as the ESP box
+                const float cx = (hp.x + fp.x) * 0.5f;
+                if (cxs >= cx - half_w && cxs <= cx + half_w && cys >= top && cys <= bot) { on_target = true; break; }
+            }
+        }
+        triggerbot::frame(on_target, diag::now_us());
     }
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000)) {

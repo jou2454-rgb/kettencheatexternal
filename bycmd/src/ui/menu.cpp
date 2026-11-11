@@ -18,6 +18,7 @@
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
 #include "../other/status.hpp"
+#include "../game/triggerbot.hpp"
 #include <cmath>
 #include <cfloat>
 #include <string>
@@ -220,7 +221,7 @@ namespace ui::menu {
         const float row = 64.f * k;
         const float crow = 72.f * k;
         const float btn = 64.f * k;
-        const float ph = pad + row * 3.f + crow + 10.f * k + btn + 6.f * k + 16.f * k;
+        const float ph = pad + row * 4.f + crow + 10.f * k + 2.f * (btn + 6.f * k) + btn + 6.f * k + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -273,6 +274,18 @@ namespace ui::menu {
         dl->AddRect(p, pmax, col(clr::border_light, a), r, 0, 1.5f * k);
 
         const float cw = w - pad * 2.f;
+        // Fire-button capture: a tap outside the panel becomes the fire button.
+        if (cfg::trigger::arming && ImGui::IsMouseReleased(0) && !g_panel_dragging && !bar::g_dragging) {
+            const ImVec2 down = io.MouseClickedPos[0], up = io.MousePos;
+            const float thr = 10.f * k, dx = up.x - down.x, dy = up.y - down.y;
+            if (!inside(down, p, pmax) && !inside(up, p, pmax) && dx * dx + dy * dy <= thr * thr) {
+                cfg::trigger::fire_x = down.x;
+                cfg::trigger::fire_y = down.y;
+                cfg::trigger::fire_set = true;
+                cfg::trigger::arming = false;
+                triggerbot::save_fire(down.x, down.y);
+            }
+        }
         ImVec2 c(p.x + pad, p.y + pad);
         const bool interactive = g_ma > 0.6f;
 
@@ -281,11 +294,31 @@ namespace ui::menu {
             {"Box", &cfg::esp::box},
             {"Name", &cfg::esp::name},
             {"Health", &cfg::esp::health},
+            {"Triggerbot", &cfg::trigger::enabled},
         };
         for (const item& it : items) {
             bool v = *it.value;
             if (toggle_row(dl, it.name, &v, c, cw, row, a, k) && interactive) *it.value = v;
             c.y += row;
+        }
+        {
+            char delay_label[32];
+            snprintf(delay_label, sizeof(delay_label), "delay: %d ms", cfg::trigger::delay_ms);
+            if (big_button(dl, delay_label, c, cw, btn, a, k) && interactive) {
+                static const int steps[] = {20, 40, 60, 80};
+                int next = 1;
+                for (int i = 0; i < 4; ++i) if (steps[i] == cfg::trigger::delay_ms) next = (i + 1) % 4;
+                cfg::trigger::delay_ms = steps[next];
+            }
+            c.y += btn + 6.f * k;
+        }
+        {
+            const char* fire_label = "set fire button";
+            if (cfg::trigger::arming) fire_label = "tap the fire button";
+            else if (triggerbot::g_uinput_state.load() < 0) fire_label = "uinput: no access";
+            else if (cfg::trigger::fire_set) fire_label = "fire: set, tap to change";
+            if (big_button(dl, fire_label, c, cw, btn, a, k) && interactive) cfg::trigger::arming = !cfg::trigger::arming;
+            c.y += btn + 6.f * k;
         }
         color_row(dl, "Color", &cfg::esp::box_col, c, cw, crow, a, k);
         c.y += crow + 10.f * k;

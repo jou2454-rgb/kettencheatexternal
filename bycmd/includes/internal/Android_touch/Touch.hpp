@@ -12,5 +12,7 @@ namespace touch {
     void update(int32_t _screen_w, int32_t _screen_h, uint8_t _orientation);
     void updateOrientation(uint8_t _orientation);
     void shutdown();
+    // overlay px -> raw units of the first touch device (inverse of the read mapping)
+    bool overlay_to_raw(float X, float Y, int32_t &rx, int32_t &ry, int32_t &max_x, int32_t &max_y);
 }
 

@@ -28,6 +28,7 @@ namespace skeleton {
     inline constexpr long long kRebuildUs = 500000;   // topology refresh period
     inline constexpr float kMaxBoneReach = 2.5f;      // metres from the root, drops props/attachments
     inline constexpr size_t kMaxSegments = 256;
+    inline constexpr int kMaxDepth = 8;               // bone links from the root
 
     struct Topology {
         uint64_t entries{0};          // TransformEntry array of the hierarchy
@@ -170,25 +171,42 @@ namespace skeleton {
         if (!world_positions(*best, pos)) return;
 
         const Vector3 root = pos[best->root];
+        // Body bones only: within reach of the root and no deeper than kMaxDepth
+        // links, so weapon/finger/prop subtrees fall away.
+        auto depth_of = [&](int i) {
+            int d = 0;
+            for (int c = i; c != best->root && c >= 0 && d <= kMaxDepth + 1; c = best->parent[c]) ++d;
+            return d;
+        };
         std::vector<std::pair<ImVec2, ImVec2>> segments;
         segments.reserve(64);
+        int head = -1, foot = -1;
         for (int i : best->bones) {
-            if (i == best->root || best->role[i] != 1) continue;
+            if (best->role[i] != 1) continue;
+            if (dist2(pos[i], root) > kMaxBoneReach * kMaxBoneReach) continue;
+            if (depth_of(i) > kMaxDepth) continue;
+            if (head < 0 || pos[i].y > pos[head].y) head = i;
+            if (foot < 0 || pos[i].y < pos[foot].y) foot = i;
+            if (i == best->root) continue;
             const int p = best->parent[i];
             if (p < 0 || best->role[p] != 1) continue;
-            if (dist2(pos[i], root) > kMaxBoneReach * kMaxBoneReach ||
-                dist2(pos[p], root) > kMaxBoneReach * kMaxBoneReach) continue;
             ImVec2 a, b;
             if (!world_to_screen(pos[p], view, proj, a) || !world_to_screen(pos[i], view, proj, b)) continue;
             segments.emplace_back(a, b);
             if (segments.size() >= kMaxSegments) break;
         }
-        if (segments.empty()) return;
+        if (segments.size() < 2 || head < 0 || foot < 0) return;
+        ImVec2 head_s, foot_s;
+        if (!world_to_screen(pos[head], view, proj, head_s) || !world_to_screen(pos[foot], view, proj, foot_s)) return;
+        const float body_px = std::fabs(foot_s.y - head_s.y);
+        const float head_r = std::clamp(body_px * 0.075f, 2.f, 12.f);
 
+        // Reference look: thin solid line over a faint shadow, head as a ring.
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        const ImU32 outline = IM_COL32(0, 0, 0, 170);
+        const ImU32 shade = IM_COL32(0, 0, 0, 90);
         const ImU32 col = IM_COL32(int(color.x * 255), int(color.y * 255), int(color.z * 255), int(color.w * 255));
-        for (const auto& s : segments) dl->AddLine(s.first, s.second, outline, 2.f);
-        for (const auto& s : segments) dl->AddLine(s.first, s.second, col, 1.2f);
+        for (const auto& s : segments) dl->AddLine(s.first, s.second, shade, 2.5f);
+        for (const auto& s : segments) dl->AddLine(s.first, s.second, col, 1.5f);
+        dl->AddCircle(ImVec2(head_s.x, head_s.y + head_r), head_r, col, 16, 1.5f);
     }
 }

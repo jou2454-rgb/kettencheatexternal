@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dolp.riselauncher">
 
+    <!-- Android 11+ hides packages the app does not declare: without this the game looks uninstalled. -->
+    <queries>
+        <package android:name="com.SKITLSE.StandRise" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:label="Rise ESP">

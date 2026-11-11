@@ -95,21 +95,31 @@ public class MainActivity extends Activity {
         Thread.sleep(1500);
         String pid = su("pidof rise_esp || echo none").trim();
         say("rise_esp запущен, pid: " + pid + ".\nоткрываю игру...");
-        ui.post(new Runnable() {
-            @Override
-            public void run() {
-                openGame();
-            }
-        });
+        openGame();
     }
 
-    private void openGame() {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(GAME_PACKAGE);
-        if (launch == null) {
-            say("игра " + GAME_PACKAGE + " не установлена");
+    // Opens the game. Normal launch first; if the system hides the package, start it through the
+    // shell as root (monkey). If that fails too, list the installed packages so the name can be checked.
+    private void openGame() throws Exception {
+        final Intent launch = getPackageManager().getLaunchIntentForPackage(GAME_PACKAGE);
+        if (launch != null) {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    startActivity(launch);
+                }
+            });
+            say("rise_esp запущен, игра открыта");
             return;
         }
-        startActivity(launch);
+        String out = su("monkey -p " + GAME_PACKAGE + " -c android.intent.category.LAUNCHER 1 2>&1; true");
+        if (out.contains("Events injected: 1")) {
+            say("rise_esp запущен, игра открыта через root");
+            return;
+        }
+        String list = su("pm list packages 2>/dev/null | grep -i -e rise -e standoff; true").trim();
+        say("игра " + GAME_PACKAGE + " не запустилась.\nмонитор: " + out.trim()
+                + "\nустановленные пакеты:\n" + (list.isEmpty() ? "(ни одного rise/standoff)" : list));
     }
 
     private void stop() throws Exception {

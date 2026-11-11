@@ -43,7 +43,6 @@ extern ImFont* fontBold;
 extern ImFont* fontMedium;
 extern ImFont* fontDesc;
 extern ImFont* espFont;
-extern ImFont* weaponFont; // weapon icon glyphs (weapon.h), nullptr when the atlas rejected it
 extern ImFont* fontMenu;   // cloudhack menu labels (Vanta Medium, 36 base px)
 extern ImFont* fontWm;     // watermark "cloudhack" (Vanta Medium, 54 base px)
 extern ImTextureID g_avatar_tex; // watermark avatar (GL texture), nullptr when unavailable

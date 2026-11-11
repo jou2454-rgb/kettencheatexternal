@@ -58,7 +58,6 @@ namespace v100 {
     inline constexpr uint64_t transforms_typeinfo = 0xCD31E68;    // mtc : yvt (player transform component)
     inline constexpr uint64_t model_typeinfo = 0xCD2DDE8;         // bis
     inline constexpr uint64_t stats_typeinfo = 0xCD360F0;         // ydm
-    inline constexpr uint64_t weapon_part_typeinfo = 0xCD34CE0;   // uyg
     inline constexpr uint64_t camera_typeinfo = 0xCD1F798;        // UnityEngine.Camera
     inline constexpr uint64_t ios_typeinfo = 0xCD36248;           // yjp : urz (kgd + ydm + vqn + 2x Transform)
     inline constexpr uint64_t presentation_typeinfo = 0xCD2E320;  // chc : pjy (vqn, uyg, kgd, yvt, szi, PlayerAnimationData)

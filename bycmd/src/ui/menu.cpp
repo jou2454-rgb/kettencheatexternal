@@ -1,7 +1,7 @@
 // ================================================================================
 // cloudhack menu: a compact panel anchored under the watermark.
-//   Box / Name / Health / Weapon / Distance - toggle switches
-//   Color                           - one ESP colour (box, health bar, distance)
+//   Box / Name / Health             - toggle switches
+//   Color                           - one ESP colour (box, health bar)
 //   unload                          - clean shutdown through status::g_quit_request
 // Panel: tap a control = release without moving; press + move = drag the panel.
 // Everything is drawn directly on the foreground draw list; no ImGui windows,
@@ -18,7 +18,6 @@
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
 #include "../other/status.hpp"
-#include "../game/weapon.hpp"
 #include <cmath>
 #include <cfloat>
 #include <string>
@@ -215,16 +214,13 @@ namespace ui::menu {
 
         // One colour for the whole ESP (the name stays white).
         cfg::esp::health_col = cfg::esp::box_col;
-        cfg::esp::distance_col = cfg::esp::box_col;
-        cfg::esp::weapon_col = cfg::esp::box_col;
 
         const float pad = 24.f * k;
         const float w = 330.f * k;
         const float row = 64.f * k;
         const float crow = 72.f * k;
         const float btn = 64.f * k;
-        const float info_h = 34.f * k;   // "my weapon: #N" calibration line
-        const float ph = pad + row * 5.f + crow + 10.f * k + btn + 6.f * k + info_h + 16.f * k;
+        const float ph = pad + row * 3.f + crow + 10.f * k + btn + 6.f * k + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -285,8 +281,6 @@ namespace ui::menu {
             {"Box", &cfg::esp::box},
             {"Name", &cfg::esp::name},
             {"Health", &cfg::esp::health},
-            {"Weapon", &cfg::esp::weapon},
-            {"Distance", &cfg::esp::distance},
         };
         for (const item& it : items) {
             bool v = *it.value;
@@ -299,16 +293,6 @@ namespace ui::menu {
             status::g_quit_request = true;
         }
         c.y += btn + 6.f * k;
-        {
-            char line[48];
-            if (weapon::g_local_name) snprintf(line, sizeof(line), "my weapon: %s", weapon::g_local_name);
-            else if (weapon::g_local_id >= 0) snprintf(line, sizeof(line), "my weapon: ? (raw %d)", weapon::g_local_id);
-            else snprintf(line, sizeof(line), "my weapon: -");
-            ImFont* f = menu_font();
-            const float fs = f->FontSize * 0.72f;
-            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, line);
-            dl->AddText(f, fs, ImVec2(c.x + (cw - ts.x) * 0.5f, c.y + (info_h - ts.y) * 0.5f), col(clr::text_dim, a), line);
-        }
 
         color_popup(dl, &cfg::esp::box_col, p, pmax, a, k);
         if (!g_panel_pressed) g_panel_dragging = false;

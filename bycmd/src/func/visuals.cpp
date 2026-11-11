@@ -10,7 +10,6 @@
 #include "../game/math.hpp"
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
-#include "../game/weapon.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -22,7 +21,6 @@
 #include <unordered_set>
 
 extern ImFont* espFont;
-extern ImFont* weaponFont;
 
 static void esp_wait(const char* stage) {
     static long long last = 0;
@@ -98,7 +96,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -118,7 +116,6 @@ void visuals::draw() {
         purge_missing(g_last_hp, live);
         purge_missing(g_motion, live);
         purge_missing(player::g_transform_cache, live);
-        purge_missing(weapon::g_cache, live);
     }
 
     // Resolve at most one name per 100 ms. Name discovery touches several
@@ -141,11 +138,6 @@ void visuals::draw() {
     const int LocalTeam = Local->team;
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
     const player::PlayerPose LocalPose = player::pose(*Local);
-    if (cfg::esp::weapon) {
-        const weapon::Info lw = weapon::resolve(*Local, true);
-        weapon::g_local_id = lw.raw;
-        weapon::g_local_name = lw.name;
-    }
     const Vector3 LocalPosition = LocalPose.feet;
     if (!LocalPose.valid || !std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
@@ -367,16 +359,6 @@ void visuals::draw() {
                 ? found->second.name.c_str() : "Enemy";
             dnick(label, BoxMax, cx, font_sz, 1.f);
         }
-        if (cfg::esp::distance) ddist(Enemy.distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
-        if (cfg::esp::weapon) {
-            const weapon::Info w = weapon::resolve(*Enemy.snap);
-            if (w.valid && w.glyph) {
-                float wy = BoxMax.y + 4.f;
-                if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
-                // Icon never wider than the box and never taller than a quarter of it.
-                dweapon(w.glyph, w.raw, cx, wy, std::clamp(900.f * inv_dist, 16.f, 34.f), bw * 2.f, 1.f);
-            }
-        }
     }
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000)) {
@@ -527,48 +509,6 @@ void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz,
         static_cast<int>(cfg::esp::name_col.w * 255 * a)
     );
     draw_text_outlined(dl, espFont, sz, tp, col, name);
-}
-
-void visuals::ddist(float dist, float x, float y, float sz, float a) {
-    if (!espFont || a < 0.01f) return;
-
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-
-    char txt[16];
-    snprintf(txt, sizeof(txt), "%dm", static_cast<int>(dist));
-
-    ImVec2 tp(roundf(x + 5.f), roundf(y));
-
-    ImU32 col = IM_COL32(
-        static_cast<int>(cfg::esp::distance_col.x * 255),
-        static_cast<int>(cfg::esp::distance_col.y * 255),
-        static_cast<int>(cfg::esp::distance_col.z * 255),
-        static_cast<int>(cfg::esp::distance_col.w * 255 * a)
-    );
-    draw_text_outlined(dl, espFont, sz, tp, col, txt);
-}
-
-void visuals::dweapon(char glyph, int id, float cx, float y, float sz, float max_w, float a) {
-    if (a < 0.01f) return;
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    (void)id;
-    ImFont* font = weaponFont;
-    if (!font || !glyph) return;
-    const char txt[2] = {glyph, 0};
-    ImVec2 ts = font->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
-    // Rifle glyphs are up to 9x wider than tall: shrink to the box width.
-    if (max_w > 4.f && ts.x > max_w) {
-        sz = std::max(8.f, sz * max_w / ts.x);
-        ts = font->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
-    }
-    ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(y));
-    ImU32 col = IM_COL32(
-        static_cast<int>(cfg::esp::weapon_col.x * 255),
-        static_cast<int>(cfg::esp::weapon_col.y * 255),
-        static_cast<int>(cfg::esp::weapon_col.z * 255),
-        static_cast<int>(cfg::esp::weapon_col.w * 255 * a)
-    );
-    draw_text_outlined(dl, font, sz, tp, col, txt);
 }
 
 void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {

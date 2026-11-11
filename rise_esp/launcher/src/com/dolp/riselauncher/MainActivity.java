@@ -21,7 +21,7 @@ import java.io.OutputStream;
 // One-button launcher: copies rise_esp out of the APK, starts it as root in the background
 // (it attaches to the game and draws the overlay) and opens the game. No adb, no terminal.
 public class MainActivity extends Activity {
-    private static final String GAME_PACKAGE = "com.SKITLSE.StandRise";
+    private static final String GAME_PACKAGE = "com.standrise.game";
     private static final String REMOTE_BIN = "/data/local/tmp/rise_esp";
     private static final String REMOTE_LOG = "/data/local/tmp/rise_esp.log";
 

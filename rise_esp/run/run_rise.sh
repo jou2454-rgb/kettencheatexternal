@@ -3,7 +3,7 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/rise_esp"
 REMOTE=/data/local/tmp/rise_esp
-PKG=com.SKITLSE.StandRise
+PKG=com.standrise.game
 [ -f "$BIN" ] || { echo "rise_esp not found next to this script"; exit 1; }
 adb wait-for-device || exit 1
 adb push "$BIN" "$REMOTE" || exit 1

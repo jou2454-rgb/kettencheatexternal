@@ -4,7 +4,7 @@
 
     <!-- Android 11+ hides packages the app does not declare: without this the game looks uninstalled. -->
     <queries>
-        <package android:name="com.SKITLSE.StandRise" />
+        <package android:name="com.standrise.game" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

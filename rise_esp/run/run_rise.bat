@@ -2,7 +2,7 @@
 setlocal
 set "BIN=%~dp0rise_esp"
 set "REMOTE=/data/local/tmp/rise_esp"
-set "PKG=com.SKITLSE.StandRise"
+set "PKG=com.standrise.game"
 
 if not exist "%BIN%" (
     echo [!] rise_esp not found next to this script

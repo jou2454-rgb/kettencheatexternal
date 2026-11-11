@@ -20,7 +20,7 @@
 
 namespace {
 
-constexpr const char* kDefaultPackage = "com.SKITLSE.StandRise";
+constexpr const char* kDefaultPackage = "com.standrise.game";
 
 // Pid of the process whose cmdline equals the package name, 0 if not running.
 int findPid(const char* package) {

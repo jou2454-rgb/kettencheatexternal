@@ -14,8 +14,9 @@ namespace rise {
 namespace {
 
 constexpr float kHeadHeight = 1.8f;                    // standing eye height above the root, assumption
-constexpr float kMaxCameraDistance = 2.f;              // head point must be this close to the camera (m)
-constexpr uint64_t kCamScanBytes = 0x1000;             // native Camera object: bytes searched for matrices
+constexpr float kNearCameraDistance = 2.f;             // view candidate this close to the head: normal
+constexpr float kFarCameraDistance = 8.f;              // up to this: accepted and flagged "far" in the status
+constexpr uint64_t kCamScanBytes = 0x4000;             // native Camera object: bytes searched for matrices
 constexpr uint64_t kScanBytesPerFrame = 4ull << 20;    // PlayerManager search budget per frame
 constexpr int kRescanFrames = 600;                     // idle frames before the next full search (~5 s)
 constexpr float kMaxHealth = 1000.f;                   // larger health values are not believed
@@ -128,7 +129,8 @@ esp::Vec3 cameraPosition(const esp::Mat4& v) {
     };
 }
 
-// Rigid transform: last row (0,0,0,1), orthonormal rotation rows.
+// Rigid transform: last row (0,0,0,1), orthonormal rotation rows. Unity's view matrix may
+// contain a Z flip, so the determinant is not checked.
 bool isRigid(const esp::Mat4& m) {
     if (std::fabs(m.at(3, 0)) > 1e-3f || std::fabs(m.at(3, 1)) > 1e-3f ||
         std::fabs(m.at(3, 2)) > 1e-3f || std::fabs(m.at(3, 3) - 1.f) > 1e-3f) return false;
@@ -144,45 +146,76 @@ bool isRigid(const esp::Mat4& m) {
     return true;
 }
 
-// Perspective projection with the expected aspect ratio (P[5] / P[0] == aspect).
-bool isProjection(const esp::Mat4& p, float aspect) {
+// Perspective projection, structure only: P[11] = +-1, P[15] = 0, positive x and y scale.
+bool isPerspective(const esp::Mat4& p) {
     if (std::fabs(std::fabs(p.at(3, 2)) - 1.f) > 1e-3f) return false;
     if (std::fabs(p.at(3, 3)) > 1e-3f || std::fabs(p.at(3, 0)) > 1e-3f || std::fabs(p.at(3, 1)) > 1e-3f) return false;
-    if (p.at(0, 0) <= 0.f || p.at(1, 1) <= 0.f) return false;
-    return std::fabs(p.at(1, 1) / p.at(0, 0) - aspect) < 0.05f * aspect;
+    return p.at(0, 0) > 0.f && p.at(1, 1) > 0.f;
 }
 
-// Finds the view and projection matrices inside the native Camera object.
-// view: rigid candidate that maps the local head close to the origin (|V * head| < kMaxCameraDistance).
-// proj: candidate that passes isProjection(). Both are checked against the screen aspect.
-// closest: distance of the rigid candidate nearest to the head, reported in the status line.
-bool scanCamera(const mem::Process& p, uint64_t nativeCam, esp::Vec3 head, float aspect,
-                esp::Mat4& view, esp::Mat4& proj, float& closest) {
-    closest = 1e30f;
-    if (!nativeCam) return false;
+// Aspect of a perspective projection, P[5] / P[0] (width / height of the rendered image).
+float aspectOf(const esp::Mat4& p) { return p.at(1, 1) / p.at(0, 0); }
+
+// What the native Camera object holds: the view (world -> camera) and the projection.
+struct CamScan {
+    esp::Mat4 view{};
+    esp::Mat4 proj{};
+    bool haveView = false;
+    bool haveProj = false;
+    bool projAspectMatch = false;  // proj has the screen aspect; otherwise the first perspective matrix
+    float viewDist = 0.f;          // distance of the view candidate from the head point
+    float closest = 0.f;           // nearest rigid candidate, for the status line (0 when none)
+    int rigid = 0;                 // rigid candidates in the scanned window
+    int perspective = 0;           // perspective candidates in the scanned window
+};
+
+// Scans the first kCamScanBytes of the native Camera object.
+// view: rigid candidate nearest to the head point, accepted up to kFarCameraDistance.
+// proj: perspective candidate with the screen aspect, else the first perspective candidate.
+CamScan scanCamera(const mem::Process& p, uint64_t nativeCam, esp::Vec3 head, float aspect) {
+    CamScan s;
+    if (!nativeCam) return s;
     std::vector<uint8_t> buf(kCamScanBytes);
-    if (!p.read(nativeCam, buf.data(), buf.size())) return false;
-    bool haveView = false, haveProj = false;
-    float bestDist = kMaxCameraDistance;
+    if (!p.read(nativeCam, buf.data(), buf.size())) return s;
+
+    esp::Mat4 firstPerspective{};
+    bool haveFirstPerspective = false;
+    float bestDist = kFarCameraDistance;
+    float nearest = 1e30f;
     for (size_t off = 0; off + 64 <= buf.size(); off += 4) {
         esp::Mat4 m;
         std::memcpy(m.m, &buf[off], 64);
-        if (!haveProj && isProjection(m, aspect)) {
-            proj = m;
-            haveProj = true;
+        if (isPerspective(m)) {
+            ++s.perspective;
+            if (!haveFirstPerspective) {
+                firstPerspective = m;
+                haveFirstPerspective = true;
+            }
+            if (!s.projAspectMatch && std::fabs(aspectOf(m) - aspect) < 0.05f * aspect) {
+                s.proj = m;
+                s.haveProj = true;
+                s.projAspectMatch = true;
+            }
         }
         if (isRigid(m)) {
+            ++s.rigid;
             const esp::Vec4 v = esp::mul(m, esp::Vec4{head.x, head.y, head.z, 1.f});
             const float d = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-            closest = std::min(closest, d);
+            nearest = std::min(nearest, d);
             if (d < bestDist) {
                 bestDist = d;
-                view = m;
-                haveView = true;
+                s.view = m;
+                s.haveView = true;
             }
         }
     }
-    return haveView && haveProj;
+    if (s.rigid > 0) s.closest = nearest;
+    s.viewDist = bestDist;
+    if (!s.projAspectMatch && haveFirstPerspective) {
+        s.proj = firstPerspective;
+        s.haveProj = true;
+    }
+    return s;
 }
 
 }  // namespace
@@ -216,19 +249,19 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
     const uint64_t cam = mainCam ? p.read<uint64_t>(mainCam + kPMC_Camera) : 0;
     const uint64_t nativeCam = cam ? p.read<uint64_t>(cam + kUnityCachedPtr) : 0;
     const esp::Vec3 head{localFeet.x, localFeet.y + kHeadHeight, localFeet.z};
-    esp::Mat4 view, proj;
-    float closest = 0.f;
     const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
-    if (!scanCamera(p, nativeCam, head, aspect, view, proj, closest)) {
-        char msg[160];
+    const CamScan camScan = scanCamera(p, nativeCam, head, aspect);
+    if (!camScan.haveView || !camScan.haveProj) {
+        char msg[256];
         std::snprintf(msg, sizeof(msg),
-                      "  camera matrices not found (nearest rigid candidate %.2f m, needs < %.1f m)\n",
-                      closest, kMaxCameraDistance);
+                      "  camera matrices not found: native 0x%llx, perspective %d, rigid %d, nearest rigid %.2f m\n",
+                      static_cast<unsigned long long>(nativeCam), camScan.perspective, camScan.rigid,
+                      camScan.closest);
         res.missing = msg;
         return res;
     }
-    res.snapshot.viewProj = esp::mul(proj, view);
-    res.snapshot.cameraPos = cameraPosition(view);
+    res.snapshot.viewProj = esp::mul(camScan.proj, camScan.view);
+    res.snapshot.cameraPos = cameraPosition(camScan.view);
     res.snapshot.localTeam = p.read<uint8_t>(localPc + kPC_Team);
 
     const std::vector<uint64_t> pcs = dictValues(p, p.read<uint64_t>(manager + kPM_Players));
@@ -270,11 +303,13 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
         if (!teamList.empty()) teamList += ",";
         teamList += std::to_string(t);
     }
-    char line[200];
+    char line[256];
     std::snprintf(line, sizeof(line),
-                  "players %zu  local team %d  other teams [%s]  hp sample %d  team filter %s",
+                  "players %zu  local team %d  other teams [%s]  hp sample %d  team filter %s  "
+                  "view %.1f m%s  aspect %.2f (screen %.2f)",
                   res.snapshot.players.size(), int(res.snapshot.localTeam), teamList.c_str(), sampleHp,
-                  otherTeam ? "on" : "off");
+                  otherTeam ? "on" : "off", camScan.viewDist,
+                  camScan.viewDist > kNearCameraDistance ? " far" : "", aspectOf(camScan.proj), aspect);
     res.info = line;
     res.ready = true;
     return res;

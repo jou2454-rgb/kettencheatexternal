@@ -16,14 +16,6 @@ namespace menu {
     inline float scale_y = 1.f;                // panel height scale
 }
 
-namespace trigger {
-    inline bool enabled = false;               // tap fire while the crosshair is on an enemy (triggerbot.hpp)
-    inline int delay_ms = 40;                  // hold on target before the first tap
-    inline bool arming = false;                // menu: the next tap outside the panel sets the fire button
-    inline bool fire_set = false;
-    inline float fire_x = 0.f, fire_y = 0.f;   // overlay px
-}
-
 namespace esp {
     inline bool box = true;
     inline bool name = false;

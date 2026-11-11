@@ -174,25 +174,6 @@ namespace touch {
         orientation = _orientation;
     }
 
-    bool overlay_to_raw(float X, float Y, int32_t &rx, int32_t &ry, int32_t &max_x, int32_t &max_y) {
-        if (inputs.empty()) return false;
-        const input &in = inputs.front();
-        if (in.absXMultiplier <= 0.f || in.absYMultiplier <= 0.f) return false;
-        const float ax = (float) in.absX.maximum, ay = (float) in.absY.maximum;
-        float fx = 0.f, fy = 0.f;
-        switch (orientation) {
-            case 1: fy = X / in.absXMultiplier; fx = ax - Y / in.absYMultiplier; break;
-            case 2: fx = ax - X / in.absXMultiplier; fy = ay - Y / in.absYMultiplier; break;
-            case 3: fy = ay - X / in.absXMultiplier; fx = Y / in.absYMultiplier; break;
-            default: fx = X / in.absXMultiplier; fy = Y / in.absYMultiplier; break;
-        }
-        rx = (int32_t) fminf(fmaxf(fx, 0.f), ax);
-        ry = (int32_t) fminf(fmaxf(fy, 0.f), ay);
-        max_x = in.absX.maximum;
-        max_y = in.absY.maximum;
-        return true;
-    }
-
     void shutdown() {
         for (auto &_input: inputs)
             _input.close();

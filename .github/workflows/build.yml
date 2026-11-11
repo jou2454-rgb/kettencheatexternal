@@ -1,0 +1,48 @@
+name: build-eeeww
+
+on:
+  push:
+    paths:
+      - 'bycmd/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK r27c
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Build (ndk-build, arm64-v8a)
+        working-directory: bycmd
+        run: |
+          ndk-build NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./jni/Android.mk \
+            NDK_APPLICATION_MK=./jni/Application.mk \
+            BYCMD_BUILD_ID="$(git rev-parse --short HEAD)" \
+            -j"$(nproc)"
+          ls -l libs/arm64-v8a obj/local/arm64-v8a/eeeww
+          sha256sum libs/arm64-v8a/eeeww obj/local/arm64-v8a/eeeww | tee eeeww.sha256
+          file libs/arm64-v8a/eeeww
+
+      - name: Upload eeeww (stripped, run this one)
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeeww-arm64
+          path: |
+            bycmd/libs/arm64-v8a/eeeww
+            bycmd/eeeww.sha256
+
+      - name: Upload eeeww (unstripped, for crash symbolisation)
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeeww-arm64-unstripped
+          path: bycmd/obj/local/arm64-v8a/eeeww

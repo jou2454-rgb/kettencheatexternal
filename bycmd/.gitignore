@@ -1,0 +1,4 @@
+jni/obj/
+jni/libs/
+libs/
+*.bak

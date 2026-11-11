@@ -1,192 +1,207 @@
 // ================================================================================
-// Weapon icon resolution for the ESP.
+// Weapon icon resolution for the ESP (dump x64 1.1.0 verified).
 //
-// Icon font: includes/fonts/esp/weapon.h ("furry_coder-Weapon-Font"), one
-// glyph per weapon on the characters 0-9, A-O, a-z (legend at the bottom).
+// Chain (dump.cs):
+//   odq -> wwv.bvvg (nzk) -> kevw (cew[]) -> uyg (WeaponPart, TypeInfo 0xCD34CE0)
+//   uyg+0x30  WeaponContext kbdx (inline struct, 0xA8 bytes)
+//     +0x00 NetObjectId Owner   (this is the byte the earlier builds misread as an id)
+//     +0x10 byte Team
+//     +0x50 jrx ActiveWeapon    => uyg+0x80
+//   jrx+0x10  WeaponId <oqrg>   (struct { byte Raw })
+//   jrx+0x18  WeaponMetaData    (skin / charm / stickers only, no name)
 //
-// Weapon source (established from bycmd.log, build 10885a5, 2026-11-11):
-//   player (odq) -> wwv.bvvg (nzk) -> kevw (cew[]) -> component of class uyg
-//   (WeaponPart, TypeInfo 0xCD34CE0). Raw dumps of five enemies:
-//     +0x30: 0x18 0x19 0x16 0x10 0x0b   differs per player, mirrored at +0x36
-//     +0x18: 1 while alive, 0 for the dead player whose +0x30 was also 0
-//   Second log (build c10d758): the values run 4,5,7,9,11,13,15,17,18 over
-//   the match and one enemy went 4 -> 13, so +0x30 is the weapon INSTANCE
-//   number (grows on every switch / pickup), not the weapon type. It is used
-//   here only as a change detector.
-//   The type is resolved by name: the objects referenced from uyg (depth 2)
-//   are treated as UnityEngine.Object wrappers, their native object is
-//   scanned for ASCII names (inline and pointed-to), and the first name that
-//   matches k_name_table gives the glyph. The native layout is not pinned,
-//   hence the scan; it runs only when the instance number changes (and every
-//   3 s while unresolved) with a hard budget of 500 reads.
+// Raw -> weapon: the named constants live in static class WeaponIds
+// (Axlebolt.Standoff.Gameplay.Features.Weaponry.Data, TypeDefIndex 20273) and
+// are assigned in its .cctor (RVA 0x9CADAE0). Their values are not in dump.cs,
+// so they are read from the running game once: the .cctor prologue loads the
+// class pointer through an ADRP+LDR pair, the pointed Il2CppClass is checked
+// by name ("WeaponIds", Il2CppClass+0x10) and its static_fields block
+// (Il2CppClass+0xB8) holds one byte per constant in declaration order:
+//   0x00..0x11 event weapons, 0x12 None, 0x13 G22 ... 0x3B VestAndHelmet.
+// Until that table is read and validated no icon is drawn.
+//
+// Icon font: includes/fonts/esp/weapon.h, one glyph per weapon (legend below).
 // ================================================================================
 
 #pragma once
 
 #include "game.hpp"
 #include <unordered_map>
-#include <cctype>
 #include <cstring>
 #include <cstdio>
 
 namespace weapon {
-    // ---- uyg layout (observed, see header) ----
-    inline constexpr uint64_t uyg_active = 0x18;      // 1 = weapon shown, 0 = none/dead (hypothesis, consistent with dumps)
-    inline constexpr uint64_t uyg_weapon_id = 0x30;   // byte, observed
-    inline constexpr uint64_t uyg_weapon_id_mirror = 0x36; // same byte again, used as a consistency check
-    inline constexpr int k_max_id = 127;
+    // ---- offsets (dump.cs 1.1.0) ----
+    inline constexpr uint64_t uyg_context = 0x30;
+    inline constexpr uint64_t ctx_owner = 0x00;
+    inline constexpr uint64_t ctx_team = 0x10;
+    inline constexpr uint64_t ctx_active_weapon = 0x50;
+    inline constexpr uint64_t uyg_active_weapon = uyg_context + ctx_active_weapon; // 0x80
+    inline constexpr uint64_t jrx_weapon_id = 0x10;
+    inline constexpr uint64_t weapon_ids_cctor_rva = 0x9CADAE0;
+    inline constexpr uint64_t il2cpp_class_name = 0x10;
+    inline constexpr uint64_t il2cpp_class_static_fields = 0xB8;
+
+    // Declaration order of WeaponIds static fields (offset == index).
+    struct named { const char* name; char glyph; };
+    inline constexpr named k_weapon_ids[] = {
+        {"ExplosiveMine", 0}, {"PlayerTurret", 0}, {"Explosion", 0}, {"StunMine", 0},
+        {"ReturnMark", 0}, {"Electricity", 0}, {"Fire", 0}, {"TeleportGrenade", 'E'},
+        {"ClownGrenade", 'E'}, {"BuffGrenade", 'E'}, {"StunMineGrenade", 'E'}, {"Cleaver", '7'},
+        {"DeagleClown", 'g'}, {"EventSPAS", 'x'}, {"GhostHands", 0}, {"PudgeExplosion", 0},
+        {"GhostCloneExplosion", 0}, {"Chandelier", 0},
+        {"None", 0},            // 0x12
+        {"G22", 'a'}, {"USP", 'b'}, {"P350", 'c'}, {"Deagle", 'g'}, {"Tec9", 'e'},
+        {"FiveSeven", 'f'}, {"Berettas", 'd'}, {"UMP45", 'i'}, {"AkimboUzi", 'l'},
+        {"MP7", 'k'}, {"P90", 'm'}, {"MP5", 'j'}, {"MAC10", 'h'}, {"VAL", 'v'},
+        {"M4A1", 'u'}, {"AKR", 's'}, {"AKR12", 'p'}, {"M4", 'q'}, {"M16", 'r'},
+        {"FAMAS", 'o'}, {"FnFal", 'n'}, {"AWM", 'C'}, {"M40", 'A'}, {"M110", 'B'},
+        {"Mallard", 't'}, {"SM1014", 'w'}, {"FabM", 'z'}, {"M60", 'y'}, {"SPAS", 'x'},
+        {"Knife", 'L'}, {"Hands", 0}, {"GrenadeHE", 'E'}, {"GrenadeSmoke", 'I'},
+        {"GrenadeFlash", 'F'}, {"GrenadeMolotov", 'G'}, {"GrenadeIncendiary", 'H'},
+        {"Bomb", 'D'}, {"Defuser", 0}, {"DefuseKit", 0}, {"Vest", 0}, {"VestAndHelmet", 0},
+    };
+    inline constexpr int k_weapon_ids_count = int(sizeof(k_weapon_ids) / sizeof(k_weapon_ids[0])); // 0x3C
+    static_assert(k_weapon_ids_count == 0x3C, "WeaponIds declaration list must match dump.cs");
+    inline constexpr int k_first_builtin = 0x13; // G22
 
     struct Info {
-        int id{0};          // weapon instance number (uyg+0x30), changes on switch
-        char glyph{0};      // 0 = weapon type not resolved
+        int raw{-1};          // WeaponId.Raw, -1 = no active weapon
+        char glyph{0};        // 0 = no icon for this weapon / table not ready
         const char* name{nullptr};
-        bool valid{false};  // instance number read and consistent
+        bool valid{false};    // active weapon object read
     };
 
-    // ---- name -> glyph (asset / prefab names, token match) ----
-    struct name_entry { const char* key; char glyph; const char* name; };
-    inline constexpr name_entry k_name_table[] = {
-        {"m9bayonet",'1',"M9 Bayonet"}, {"bayonet",'1',"M9 Bayonet"}, {"butterfly",'2',"Butterfly"},
-        {"dualdaggers",'3',"Dual Daggers"}, {"daggers",'3',"Dual Daggers"}, {"shadowdaggers",'3',"Dual Daggers"},
-        {"flip",'4',"Flip Knife"}, {"flipknife",'4',"Flip Knife"}, {"scorpion",'5',"Scorpion"},
-        {"stiletto",'6',"Stiletto"}, {"tanto",'7',"Tanto"}, {"karambit",'8',"Karambit"},
-        {"jkommando",'9',"Jkommando"}, {"kommando",'9',"Jkommando"}, {"kunai",'J',"Kunai"},
-        {"fang",'K',"Fang"}, {"dagger",'N',"Dagger"}, {"katana",'O',"Katana"}, {"knife",'L',"Knife"},
-        {"c4",'D',"C4"}, {"bomb",'D',"C4"}, {"hegrenade",'E',"HE"}, {"grenade",'E',"HE"}, {"he",'E',"HE"},
-        {"flashbang",'F',"Flash"}, {"flash",'F',"Flash"}, {"molotov",'G',"Molotov"},
-        {"incendiary",'H',"Incendiary"}, {"smoke",'I',"Smoke"},
-        {"g22",'a',"G22"}, {"glock",'a',"G22"}, {"usp",'b',"USP"}, {"usps",'b',"USP"},
-        {"p350",'c',"P350"}, {"p250",'c',"P350"}, {"dualberettas",'d',"Dual Berettas"}, {"berettas",'d',"Dual Berettas"},
-        {"beretta",'d',"Dual Berettas"}, {"tec9",'e',"Tec-9"}, {"fiveseven",'f',"Five-SeveN"}, {"57",'f',"Five-SeveN"},
-        {"deagle",'g',"Desert Eagle"}, {"deserteagle",'g',"Desert Eagle"},
-        {"mac10",'h',"MAC-10"}, {"ump45",'i',"UMP45"}, {"ump",'i',"UMP45"}, {"mp5",'j',"MP5"}, {"mp7",'k',"MP7"},
-        {"dualuzi",'l',"Dual UZI"}, {"uzi",'l',"Dual UZI"}, {"p90",'m',"P90"},
-        {"fal",'n',"FAL"}, {"g3",'n',"G3"}, {"famas",'o',"FAMAS"}, {"akr12",'p',"AKR-12"}, {"ak12",'p',"AKR-12"},
-        {"m4",'q',"M4"}, {"m4a4",'q',"M4"}, {"m4a1",'q',"M4"}, {"m16",'r',"M16"}, {"akr",'s',"AKR"}, {"ak47",'s',"AKR"},
-        {"ak",'s',"AKR"}, {"scar",'t',"SCAR"}, {"aug",'v',"AUG"}, {"m249",'w',"M249"},
-        {"spas",'x',"SPAS-12"}, {"spas12",'x',"SPAS-12"}, {"m40",'A',"M40"}, {"sr25",'B',"SR-25"},
-        {"awm",'C',"AWM"}, {"awp",'C',"AWM"}, {"m110",'y',"M110"}, {"svd",'z',"SVD"},
+    // ---- raw -> name/glyph table, read from the game ----
+    struct table_state {
+        bool ready{false};
+        int pid{-1};
+        uint64_t klass{0};
+        uint8_t raw[0x3C]{};
+        const named* by_raw[256]{};
+        long long last_try_ms{0};
+        int tries{0};
     };
+    inline table_state g_table;
 
-    inline const name_entry* lookup_key(const char* key, size_t len) {
-        if (len < 2 || len > 16) return nullptr;
-        for (const name_entry& e : k_name_table) {
-            size_t i = 0;
-            while (i < len && e.key[i] && e.key[i] == key[i]) ++i;
-            if (i == len && e.key[i] == 0) return &e;
-        }
-        return nullptr;
+    inline bool read_cstring(uint64_t address, char* out, size_t cap) {
+        if (!plausible(address) || address < 0x10000) return false;
+        if (!mem_read(address, out, cap - 1)) return false;
+        out[cap - 1] = 0;
+        for (size_t i = 0; i < cap - 1 && out[i]; ++i)
+            if ((unsigned char)out[i] < 0x20 || (unsigned char)out[i] > 0x7E) return false;
+        return out[0] != 0;
     }
 
-    // Whole lowercase string without separators first ("AKR-12" -> akr12),
-    // then alphanumeric tokens ("wpn_akr12_skin03(Clone)" -> wpn akr12 skin03 clone).
-    inline const name_entry* match_text(const char* text, size_t n) {
-        char whole[48]; size_t wl = 0;
-        for (size_t i = 0; i < n && wl < sizeof(whole) - 1; ++i) {
-            const unsigned char ch = (unsigned char)text[i];
-            if (std::isalnum(ch)) whole[wl++] = char(std::tolower(ch));
-        }
-        if (const name_entry* e = lookup_key(whole, wl)) return e;
-        char tok[48]; size_t tl = 0;
-        for (size_t i = 0; i <= n; ++i) {
-            const unsigned char ch = i < n ? (unsigned char)text[i] : 0;
-            if (ch && std::isalnum(ch)) { if (tl < sizeof(tok) - 1) tok[tl++] = char(std::tolower(ch)); }
-            else { if (const name_entry* e = lookup_key(tok, tl)) return e; tl = 0; }
-        }
-        return nullptr;
+    inline bool class_named(uint64_t klass, const char* expected) {
+        if (!plausible(klass) || klass < 0x10000) return false;
+        char name[32]{};
+        return read_cstring(rpm<uint64_t>(klass + il2cpp_class_name), name, sizeof(name)) &&
+               std::strcmp(name, expected) == 0;
     }
 
-    // Printable ASCII with at least two letters, 3..40 chars, NUL-terminated inside buf.
-    inline int ascii_name(const char* buf, size_t cap) {
-        int letters = 0; size_t i = 0;
-        for (; i < cap && buf[i]; ++i) {
-            const unsigned char ch = (unsigned char)buf[i];
-            if (ch < 0x20 || ch > 0x7E) return 0;
-            if (std::isalpha(ch)) ++letters;
+    inline bool load_table() {
+        if (g_table.ready && g_table.pid == proc::pid) return true;
+        const long long now = diag::now_ms();
+        if (now - g_table.last_try_ms < 5000) return false;
+        g_table.last_try_ms = now;
+        ++g_table.tries;
+        g_table.ready = false;
+        g_table.pid = proc::pid;
+        if (!proc::lib) return false;
+
+        // 1. ADRP/ADD/LDR walk over the .cctor prologue: every loaded 64-bit
+        //    slot is a candidate TypeInfo pointer; the Il2CppClass name decides.
+        uint32_t code[96]{};
+        const uint64_t cctor = proc::lib + weapon_ids_cctor_rva;
+        if (!mem_read(cctor, code, sizeof(code))) {
+            diag::log("WEAPON", "WeaponIds .cctor unreadable at 0x%llx", (unsigned long long)cctor);
+            return false;
         }
-        if (i >= cap || i < 3 || letters < 2) return 0;
-        return int(i);
+        uint64_t regs[32]{};
+        bool known[32]{};
+        uint64_t klass = 0;
+        for (int i = 0; i < 96 && !klass; ++i) {
+            const uint32_t insn = code[i];
+            const uint64_t pc = cctor + uint64_t(i) * 4;
+            if ((insn & 0x9F000000u) == 0x90000000u) {                   // ADRP Xd, page
+                const uint64_t immlo = (insn >> 29) & 3, immhi = (insn >> 5) & 0x7FFFF;
+                int64_t imm = int64_t((immhi << 2) | immlo);
+                if (imm & (1 << 20)) imm -= (1 << 21);
+                regs[insn & 31] = (pc & ~0xFFFULL) + uint64_t(imm << 12);
+                known[insn & 31] = true;
+            } else if ((insn & 0xFF800000u) == 0x91000000u) {            // ADD Xd, Xn, #imm12
+                const int rn = (insn >> 5) & 31, rd = insn & 31;
+                if (known[rn]) { regs[rd] = regs[rn] + ((insn >> 10) & 0xFFF); known[rd] = true; }
+                else known[rd] = false;
+            } else if ((insn & 0xFFC00000u) == 0xF9400000u) {            // LDR Xt, [Xn, #imm12*8]
+                const int rn = (insn >> 5) & 31, rt = insn & 31;
+                if (known[rn]) {
+                    const uint64_t slot = regs[rn] + ((insn >> 10) & 0xFFF) * 8;
+                    const uint64_t value = rpm<uint64_t>(slot);
+                    if (class_named(value, "WeaponIds")) { klass = value; break; }
+                    regs[rt] = value; known[rt] = plausible(value);
+                } else known[rt] = false;
+            } else if ((insn & 0xFC000000u) == 0x94000000u) {            // BL: stop at the first call after a miss
+                continue;
+            } else if (insn == 0xD65F03C0u) {                            // RET
+                break;
+            }
+        }
+        if (!klass) {
+            diag::log("WEAPON", "WeaponIds class not found from .cctor (try %d); first words %08x %08x %08x %08x",
+                      g_table.tries, code[0], code[1], code[2], code[3]);
+            return false;
+        }
+        // 2. static_fields block: one byte per constant.
+        const uint64_t statics = rpm<uint64_t>(klass + il2cpp_class_static_fields);
+        uint8_t raw[0x3C]{};
+        if (!plausible(statics) || !mem_read(statics, raw, sizeof(raw))) {
+            diag::log("WEAPON", "WeaponIds statics unreadable klass=0x%llx statics=0x%llx",
+                      (unsigned long long)klass, (unsigned long long)statics);
+            return false;
+        }
+        // 3. validation: the built-in constants must be pairwise distinct and
+        //    not all zero (an un-run .cctor leaves zeros).
+        bool seen[256]{};
+        int nonzero = 0;
+        for (int i = k_first_builtin; i < k_weapon_ids_count; ++i) {
+            if (seen[raw[i]]) {
+                diag::log("WEAPON", "WeaponIds statics rejected: duplicate raw %d (%s)", raw[i], k_weapon_ids[i].name);
+                return false;
+            }
+            seen[raw[i]] = true;
+            if (raw[i]) ++nonzero;
+        }
+        if (nonzero < 20) {
+            diag::log("WEAPON", "WeaponIds statics rejected: %d non-zero values (class not initialised yet?)", nonzero);
+            return false;
+        }
+        std::memset(g_table.by_raw, 0, sizeof(g_table.by_raw));
+        std::memcpy(g_table.raw, raw, sizeof(raw));
+        for (int i = k_weapon_ids_count - 1; i >= 0; --i)      // built-ins override event ids on collision
+            if (i >= k_first_builtin || !g_table.by_raw[raw[i]]) g_table.by_raw[raw[i]] = &k_weapon_ids[i];
+        g_table.by_raw[raw[0x12]] = &k_weapon_ids[0x12];      // None
+        g_table.klass = klass;
+        g_table.ready = true;
+
+        char line[1024]; int used = 0;
+        for (int i = k_first_builtin; i < k_weapon_ids_count && used < int(sizeof(line)) - 32; ++i)
+            used += std::snprintf(line + used, sizeof(line) - size_t(used), "%s%s=%d", i > k_first_builtin ? " " : "", k_weapon_ids[i].name, raw[i]);
+        diag::log("WEAPON", "WeaponIds table ready klass=0x%llx statics=0x%llx None=%d: %s",
+                  (unsigned long long)klass, (unsigned long long)statics, raw[0x12], line);
+        return true;
     }
 
-    struct probe_ctx {
-        int budget{0};
-        char seen[8][56];
-        int seen_count{0};
-        bool want_seen{false};
-    };
-
-    inline void note(probe_ctx& ctx, const char* where, const char* text) {
-        if (!ctx.want_seen || ctx.seen_count >= 8) return;
-        std::snprintf(ctx.seen[ctx.seen_count++], sizeof(ctx.seen[0]), "%s'%s'", where, text);
-    }
-
-    // Native Unity object behind a managed wrapper: scan its first 0x100
-    // bytes for inline ASCII runs and for pointers to ASCII strings; the
-    // first one that names a weapon wins. Unverified layout => no fixed offset.
-    inline const name_entry* scan_native(uint64_t native, const char* where, probe_ctx& ctx) {
-        if (!plausible(native) || native < 0x10000 || ctx.budget <= 0) return nullptr;
-        unsigned char block[0x100]{};
-        --ctx.budget;
-        if (!mem_read(native, block, sizeof(block))) return nullptr;
-        // inline runs
-        for (size_t i = 0; i + 3 < sizeof(block); ) {
-            const int n = ascii_name(reinterpret_cast<const char*>(block + i), sizeof(block) - i);
-            if (n >= 3) {
-                char tag[24]; std::snprintf(tag, sizeof(tag), "%s+0x%zx:", where, i);
-                if (const name_entry* e = match_text(reinterpret_cast<const char*>(block + i), size_t(n))) return e;
-                note(ctx, tag, reinterpret_cast<const char*>(block + i));
-                i += size_t(n);
-            } else ++i;
-        }
-        // pointed strings
-        for (size_t i = 0x10; i + 8 <= sizeof(block); i += 8) {
-            uint64_t ptr = 0; std::memcpy(&ptr, block + i, 8);
-            if (!plausible(ptr) || ptr < 0x10000 || ctx.budget <= 0) continue;
-            char str[44]{};
-            --ctx.budget;
-            if (!mem_read(ptr, str, sizeof(str) - 1)) continue;
-            const int n = ascii_name(str, sizeof(str));
-            if (n < 3) continue;
-            char tag[24]; std::snprintf(tag, sizeof(tag), "%s+0x%zx->", where, i);
-            if (const name_entry* e = match_text(str, size_t(n))) return e;
-            note(ctx, tag, str);
-        }
-        return nullptr;
-    }
-
-    // Managed object: every reference field is treated as a possible
-    // UnityEngine.Object wrapper (+0x10 m_CachedPtr -> native) and, one level
-    // down, as a plain object whose fields are wrappers.
-    inline const name_entry* scan_managed(uint64_t object, int depth, const char* where, probe_ctx& ctx) {
-        if (!obj_ptr(object) || ctx.budget <= 0) return nullptr;
-        uint64_t fields[24]{};
-        --ctx.budget;
-        if (!mem_read(object + 0x10, fields, sizeof(fields))) return nullptr;
-        for (int i = 0; i < 24 && ctx.budget > 0; ++i) {
-            const uint64_t value = fields[i];
-            if (!obj_ptr(value)) continue;
-            char tag[20]; std::snprintf(tag, sizeof(tag), "%s+%x", where, 0x10 + i * 8);
-            const uint64_t cached = rpm<uint64_t>(value + v100::unity_cached_ptr);
-            --ctx.budget;
-            if (const name_entry* e = scan_native(cached, tag, ctx)) return e;
-            if (depth > 1)
-                if (const name_entry* e = scan_managed(value, depth - 1, tag, ctx)) return e;
-        }
-        return nullptr;
-    }
-
+    // ---- per-player resolution ----
     struct cache_entry {
         uint64_t part{0};
         long long part_ms{0};
         long long read_ms{0};
-        long long probe_ms{0};
-        long long dump_ms{0};
-        int resolved_for_id{-1};   // instance id the glyph was resolved for
         Info info{};
     };
     inline std::unordered_map<uint64_t, cache_entry> g_cache;
 
-    // WeaponPart (uyg) of a player: nzk parts array, exact class match.
     inline uint64_t find_part(uint64_t player) {
         const uint64_t part_class = typeinfo(v100::weapon_part_typeinfo);
         if (!part_class) return 0;
@@ -207,76 +222,45 @@ namespace weapon {
         if (now - c.read_ms < 250) return c.info;
         c.read_ms = now;
 
+        const bool table = load_table();
         if (!c.part || now - c.part_ms > 2000 || !exact_class(c.part, typeinfo(v100::weapon_part_typeinfo))) {
             c.part = find_part(p.object);
             c.part_ms = now;
         }
         Info next{};
-        next.glyph = c.info.glyph;
-        next.name = c.info.name;
         if (c.part) {
-            uint8_t block[8]{};
-            if (mem_read(c.part + uyg_weapon_id, block, sizeof(block))) {
-                const int id = block[0];
-                const int mirror = block[uyg_weapon_id_mirror - uyg_weapon_id];
-                if (id > 0 && id <= k_max_id && id == mirror) { next.id = id; next.valid = true; }
-            }
-            // The instance id changes on every weapon switch / pickup: resolve
-            // the type again then, and retry every 3 s while still unknown.
-            const bool stale = next.valid && (next.id != c.resolved_for_id ||
-                               (!next.glyph && now - c.probe_ms > 3000));
-            if (stale) {
-                c.probe_ms = now;
-                probe_ctx ctx;
-                ctx.budget = 500;
-                ctx.want_seen = is_local;
-                const name_entry* e = scan_managed(c.part, 2, "uyg", ctx);
-                next.glyph = e ? e->glyph : 0;
-                next.name = e ? e->name : nullptr;
-                c.resolved_for_id = next.id;
-                if (e) diag::log("WEAPON", "%s object=0x%llx inst=%d weapon=%s glyph='%c' (reads left %d)",
-                                 is_local ? "LOCAL" : "enemy", (unsigned long long)p.object, next.id, e->name, e->glyph, ctx.budget);
-                else if (is_local) {
-                    char joined[8 * 58 + 1]; int used = 0;
-                    for (int i = 0; i < ctx.seen_count; ++i)
-                        used += std::snprintf(joined + used, sizeof(joined) - size_t(used), "%s%s", i ? " | " : "", ctx.seen[i]);
-                    diag::log("WEAPON", "LOCAL inst=%d no weapon name found (reads left %d); seen: %s",
-                              next.id, ctx.budget, ctx.seen_count ? joined : "(none)");
+            const uint64_t active = rpm<uint64_t>(c.part + uyg_active_weapon);
+            if (obj_ptr(active)) {
+                const int raw = rpm<uint8_t>(active + jrx_weapon_id);
+                next.raw = raw;
+                next.valid = true;
+                if (table && g_table.by_raw[raw]) {
+                    next.name = g_table.by_raw[raw]->name;
+                    next.glyph = g_table.by_raw[raw]->glyph;
                 }
             }
-            if (!next.valid) { next.glyph = 0; next.name = nullptr; c.resolved_for_id = -1; }
-            if (is_local && diag::every(c.dump_ms, 60000)) {
-                uint64_t q[16]{};
-                if (mem_read(c.part, q, sizeof(q))) {
-                    char line[16 * 19 + 1]; int used = 0;
-                    for (int i = 0; i < 16 && used < int(sizeof(line)) - 20; ++i)
-                        used += std::snprintf(line + used, sizeof(line) - size_t(used), "%s%llx", i ? " " : "", (unsigned long long)q[i]);
-                    diag::log("WEAPON", "uyg dump LOCAL object=0x%llx part=0x%llx: %s", (unsigned long long)p.object, (unsigned long long)c.part, line);
-                }
-            }
-        } else {
-            next = {};
-            c.resolved_for_id = -1;
         }
-        if (is_local && next.id != c.info.id)
-            diag::log("WEAPON", "local weapon inst=%d%s", next.id, next.valid ? "" : " (none)");
+        if (next.raw != c.info.raw || next.glyph != c.info.glyph) {
+            diag::log("WEAPON", "%s object=0x%llx raw=%d weapon=%s glyph=%c",
+                      is_local ? "LOCAL" : "enemy", (unsigned long long)p.object, next.raw,
+                      next.name ? next.name : (next.valid ? (table ? "unknown-raw" : "table-not-ready") : "none"),
+                      next.glyph ? next.glyph : '-');
+        }
         c.info = next;
         return c.info;
     }
 
-    inline const char* g_local_name = nullptr;   // menu status line
+    inline int g_local_id = 0;                 // menu status line (raw)
+    inline const char* g_local_name = nullptr; // menu status line
 
-    inline int g_local_id = 0;   // menu status line
-
-    // ---- glyph legend (identified visually from the font; (?) = by shape only) ----
+    // ---- glyph legend (font identified visually; (?) = by shape only) ----
     // knives:  1 M9 Bayonet, 2 Butterfly, 3 Dual Daggers, 4 Flip(?), 5 Scorpion(?),
-    //          6 Stiletto(?), 7 Tanto(?), 8 Karambit, 9 Jkommando(?), J Kunai,
-    //          K Fang(?), L Standoff knife(?), M Stiletto-type(?), N Dagger(?), O Katana
+    //          6 Stiletto(?), 7 Tanto/Cleaver(?), 8 Karambit, 9 Jkommando(?), J Kunai,
+    //          K Fang(?), L generic knife, N Dagger(?), O Katana, 0 "no icon" text
     // utility: D C4, E HE grenade, F Flashbang, G Molotov, H Incendiary, I Smoke
-    // pistols: a G22, b USP, c P350, d Dual Berettas, e Tec-9, f Five-SeveN, g Desert Eagle
-    // SMG:     h MAC-10, i UMP45, j MP5, k MP7, l Dual UZI(?), m P90
-    // rifles:  n FAL-type(?), o FAMAS, p AKR-12, q M4, r M16, s AKR, t SCAR-type(?),
-    //          u scoped M4(?), v rifle(?), w LMG(?)
-    // other:   x SPAS-12, A M40, B SR-25, C AWM, y DMR(?), z scoped rifle(?)
-    // 0 = "no icon" placeholder glyph.
+    // pistols: a G22, b USP, c P350, d Berettas, e Tec-9, f Five-SeveN, g Deagle
+    // SMG:     h MAC-10, i UMP45, j MP5, k MP7, l Akimbo UZI, m P90
+    // rifles:  n FN FAL, o FAMAS, p AKR-12, q M4, r M16, s AKR, t Mallard(?),
+    //          u M4A1(?), v VAL(?), w SM1014(?), y M60(?), z FabM(?)
+    // other:   x SPAS, A M40, B M110, C AWM
 }

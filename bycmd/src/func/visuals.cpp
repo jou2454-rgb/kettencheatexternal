@@ -142,8 +142,8 @@ void visuals::draw() {
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
     const player::PlayerPose LocalPose = player::pose(*Local);
     if (cfg::esp::weapon) {
-        const weapon::Info lw = weapon::resolve(*Local, true);   // keeps the local probe/log alive
-        weapon::g_local_id = lw.id;
+        const weapon::Info lw = weapon::resolve(*Local, true);
+        weapon::g_local_id = lw.raw;
         weapon::g_local_name = lw.name;
     }
     const Vector3 LocalPosition = LocalPose.feet;
@@ -373,7 +373,8 @@ void visuals::draw() {
             if (w.valid && w.glyph) {
                 float wy = BoxMax.y + 4.f;
                 if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
-                dweapon(w.glyph, w.id, cx, wy, std::clamp(1100.f * inv_dist, 22.f, 40.f), font_sz, 1.f);
+                // Icon never wider than the box and never taller than a quarter of it.
+                dweapon(w.glyph, w.raw, cx, wy, std::clamp(900.f * inv_dist, 16.f, 34.f), bw * 2.f, 1.f);
             }
         }
     }
@@ -547,14 +548,19 @@ void visuals::ddist(float dist, float x, float y, float sz, float a) {
     draw_text_outlined(dl, espFont, sz, tp, col, txt);
 }
 
-void visuals::dweapon(char glyph, int id, float cx, float y, float sz, float text_sz, float a) {
+void visuals::dweapon(char glyph, int id, float cx, float y, float sz, float max_w, float a) {
     if (a < 0.01f) return;
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    (void)id; (void)text_sz;
+    (void)id;
     ImFont* font = weaponFont;
     if (!font || !glyph) return;
     const char txt[2] = {glyph, 0};
     ImVec2 ts = font->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
+    // Rifle glyphs are up to 9x wider than tall: shrink to the box width.
+    if (max_w > 4.f && ts.x > max_w) {
+        sz = std::max(8.f, sz * max_w / ts.x);
+        ts = font->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
+    }
     ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(y));
     ImU32 col = IM_COL32(
         static_cast<int>(cfg::esp::weapon_col.x * 255),

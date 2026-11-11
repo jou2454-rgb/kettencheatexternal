@@ -26,6 +26,7 @@ jobs:
           ndk-build NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=./jni/Android.mk \
             NDK_APPLICATION_MK=./jni/Application.mk \
+            RISE_BUILD=${{ github.sha }} \
             -j"$(nproc)"
           cp ../run/run_rise.bat ../run/run_rise.sh libs/arm64-v8a/
           ls -l libs/arm64-v8a

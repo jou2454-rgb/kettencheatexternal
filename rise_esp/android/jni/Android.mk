@@ -1,11 +1,15 @@
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
+# Build id written at the top of the log file (CI passes the commit).
+RISE_BUILD ?= dev
+
 LOCAL_MODULE := rise_esp
 
 LOCAL_SRC_FILES := \
     ../src/main_android.cpp \
     ../src/draw.cpp \
+    ../src/dbg/log.cpp \
     ../src/ui/bar.cpp \
     ../src/ui/menu.cpp \
     ../src/ui/widgets/widgets.cpp \
@@ -32,7 +36,8 @@ LOCAL_C_INCLUDES := \
     $(LOCAL_PATH)/../src \
     $(LOCAL_PATH)/../src/ui
 
-LOCAL_CPPFLAGS := -std=c++17 -fno-rtti -fno-exceptions -O2 -Wno-error=format-security
+LOCAL_CPPFLAGS := -std=c++17 -fno-rtti -fno-exceptions -O2 -Wno-error=format-security \
+    -DRISE_BUILD=\"$(RISE_BUILD)\"
 LOCAL_LDLIBS := -lEGL -lGLESv3 -landroid -ldl -llog
 
 include $(BUILD_EXECUTABLE)

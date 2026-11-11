@@ -15,11 +15,14 @@ namespace {
 
 constexpr float kHeadHeight = 1.8f;                    // standing eye height above the root, assumption
 constexpr float kNearCameraDistance = 2.f;             // view candidate this close to the head: normal
-constexpr float kFarCameraDistance = 8.f;              // up to this: accepted and flagged "far" in the status
-constexpr uint64_t kCamScanBytes = 0x4000;             // native Camera object: bytes searched for matrices
+constexpr float kFarCameraDistance = 8.f;              // up to this: accepted and flagged "far"
+constexpr size_t kCamScanBytes = 0x4000;               // native Camera object: bytes searched for matrices
 constexpr uint64_t kScanBytesPerFrame = 4ull << 20;    // PlayerManager search budget per frame
 constexpr int kRescanFrames = 600;                     // idle frames before the next full search (~5 s)
 constexpr float kMaxHealth = 1000.f;                   // larger health values are not believed
+constexpr size_t kRemoteDumps = 2;                     // remote player objects dumped per read
+
+ScanStats g_scan;   // PlayerManager search statistics, see managerScanStats()
 
 // Values of Dictionary<int, PlayerController> (live entries only).
 std::vector<uint64_t> dictValues(const mem::Process& p, uint64_t dict) {
@@ -56,6 +59,13 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
     static uint64_t cached = 0;
     static ManagerScan scan;
     static std::vector<uint8_t> buf(1u << 20);
+    const auto publish = [&]() {
+        g_scan.active = scan.active;
+        g_scan.idle = scan.idle;
+        g_scan.region = scan.region;
+        g_scan.regions = scan.regions.size();
+        g_scan.addr = scan.addr;
+    };
 
     const uint64_t klass = p.read<uint64_t>(gameBase + kTypeInfoPlayerManager);
     if (!klass) return 0;
@@ -67,6 +77,7 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
     if (!scan.active) {
         if (scan.idle > 0) {
             --scan.idle;
+            publish();
             return 0;
         }
         scan.regions = p.rwRegions();
@@ -75,15 +86,18 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
         scan.active = !scan.regions.empty();
         if (!scan.active) {
             scan.idle = kRescanFrames;
+            publish();
             return 0;
         }
+        ++g_scan.passes;
     }
 
     uint64_t budget = kScanBytesPerFrame;
     while (budget > 0) {
-        if (scan.region >= scan.regions.size()) {          // pass finished without a match
+        if (scan.region >= scan.regions.size()) {   // pass finished without a match
             scan.active = false;
             scan.idle = kRescanFrames;
+            publish();
             return 0;
         }
         const uint64_t end = scan.regions[scan.region].second;
@@ -95,6 +109,7 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
         const uint64_t at = scan.addr;
         scan.addr += n;
         budget -= std::min<uint64_t>(budget, n);
+        g_scan.bytesTotal += n;
         if (!p.read(at, buf.data(), n)) continue;
         for (size_t off = 0; off + 8 <= n; off += 8) {
             uint64_t v;
@@ -107,9 +122,12 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
             if (count < 0 || count > 4096) continue;
             cached = obj;
             scan.active = false;
+            ++g_scan.hits;
+            publish();
             return obj;
         }
     }
+    publish();
     return 0;
 }
 
@@ -164,7 +182,7 @@ struct CamScan {
     bool haveProj = false;
     bool projAspectMatch = false;  // proj has the screen aspect; otherwise the first perspective matrix
     float viewDist = 0.f;          // distance of the view candidate from the head point
-    float closest = 0.f;           // nearest rigid candidate, for the status line (0 when none)
+    float closest = 0.f;           // nearest rigid candidate (0 when there is none)
     int rigid = 0;                 // rigid candidates in the scanned window
     int perspective = 0;           // perspective candidates in the scanned window
 };
@@ -220,57 +238,86 @@ CamScan scanCamera(const mem::Process& p, uint64_t nativeCam, esp::Vec3 head, fl
 
 }  // namespace
 
+ScanStats managerScanStats() { return g_scan; }
+
 ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int screenH) {
     ReadResult res;
     res.snapshot.screenW = static_cast<float>(screenW);
     res.snapshot.screenH = static_cast<float>(screenH);
+    Diag& d = res.diag;
     if (!gameBase) {
         res.missing = "  libil2cpp.so is not mapped in the process\n";
         return res;
     }
 
-    const uint64_t manager = findPlayerManager(p, gameBase);
-    if (!manager) {
+    d.manager = findPlayerManager(p, gameBase);
+    if (!d.manager) {
         res.missing = "  PlayerManager instance not found yet (match not loaded, or still searching)\n";
         return res;
     }
-    const uint64_t localPc = p.read<uint64_t>(manager + kPM_LocalPlayer);
-    if (!localPc) {
+    d.dumps.push_back({"manager", d.manager, 0x200});
+
+    d.localPc = p.read<uint64_t>(d.manager + kPM_LocalPlayer);
+    if (!d.localPc) {
         res.missing = "  local player not set yet\n";
         return res;
     }
+    d.dumps.push_back({"local_pc", d.localPc, 0x400});
+
+    d.movement = p.read<uint64_t>(d.localPc + kPC_Movement);
+    d.translation = d.movement ? p.read<uint64_t>(d.movement + kMC_TranslationData) : 0;
+    if (d.movement) d.dumps.push_back({"movement", d.movement, 0x200});
+    if (d.translation) d.dumps.push_back({"translation", d.translation, 0x100});
+
     esp::Vec3 localFeet;
-    if (!playerPosition(p, localPc, localFeet)) {
+    if (!playerPosition(p, d.localPc, localFeet)) {
         res.missing = "  local player position not readable yet\n";
         return res;
     }
+    d.localFeet = localFeet;
+    d.haveLocalFeet = true;
 
-    const uint64_t mainCam = p.read<uint64_t>(localPc + kPC_MainCamera);
-    const uint64_t cam = mainCam ? p.read<uint64_t>(mainCam + kPMC_Camera) : 0;
-    const uint64_t nativeCam = cam ? p.read<uint64_t>(cam + kUnityCachedPtr) : 0;
+    d.mainCam = p.read<uint64_t>(d.localPc + kPC_MainCamera);
+    if (d.mainCam) d.dumps.push_back({"player_main_camera", d.mainCam, 0x100});
+    d.camera = d.mainCam ? p.read<uint64_t>(d.mainCam + kPMC_Camera) : 0;
+    if (d.camera) d.dumps.push_back({"camera_managed", d.camera, 0x100});
+    d.nativeCam = d.camera ? p.read<uint64_t>(d.camera + kUnityCachedPtr) : 0;
+    if (d.nativeCam) d.dumps.push_back({"native_cam", d.nativeCam, kCamScanBytes});
+
     const esp::Vec3 head{localFeet.x, localFeet.y + kHeadHeight, localFeet.z};
     const float aspect = static_cast<float>(screenW) / static_cast<float>(screenH);
-    const CamScan camScan = scanCamera(p, nativeCam, head, aspect);
-    if (!camScan.haveView || !camScan.haveProj) {
+    const CamScan cam = scanCamera(p, d.nativeCam, head, aspect);
+    d.perspective = cam.perspective;
+    d.rigid = cam.rigid;
+    d.nearestRigid = cam.closest;
+    d.viewDist = cam.viewDist;
+    d.viewFar = cam.haveView && cam.viewDist > kNearCameraDistance;
+    d.projAspectMatch = cam.projAspectMatch;
+    d.projAspect = cam.haveProj ? aspectOf(cam.proj) : 0.f;
+    d.view = cam.view;
+    d.proj = cam.proj;
+    if (!cam.haveView || !cam.haveProj) {
         char msg[256];
         std::snprintf(msg, sizeof(msg),
                       "  camera matrices not found: native 0x%llx, perspective %d, rigid %d, nearest rigid %.2f m\n",
-                      static_cast<unsigned long long>(nativeCam), camScan.perspective, camScan.rigid,
-                      camScan.closest);
+                      static_cast<unsigned long long>(d.nativeCam), cam.perspective, cam.rigid, cam.closest);
         res.missing = msg;
         return res;
     }
-    res.snapshot.viewProj = esp::mul(camScan.proj, camScan.view);
-    res.snapshot.cameraPos = cameraPosition(camScan.view);
-    res.snapshot.localTeam = p.read<uint8_t>(localPc + kPC_Team);
+    d.haveMatrices = true;
+    res.snapshot.viewProj = esp::mul(cam.proj, cam.view);
+    res.snapshot.cameraPos = cameraPosition(cam.view);
+    res.snapshot.localTeam = p.read<uint8_t>(d.localPc + kPC_Team);
 
-    const std::vector<uint64_t> pcs = dictValues(p, p.read<uint64_t>(manager + kPM_Players));
+    const std::vector<uint64_t> pcs = dictValues(p, p.read<uint64_t>(d.manager + kPM_Players));
+    static const char* const kRemoteNames[kRemoteDumps] = {"remote_pc0", "remote_pc1"};
     std::set<int> teams;
     int sampleHp = -1;
+    size_t remoteDumps = 0;
     for (const uint64_t pc : pcs) {
         esp::Player pl;
         pl.id = pc;
-        pl.local = pc == localPc;
+        pl.local = pc == d.localPc;
         pl.team = p.read<uint8_t>(pc + kPC_Team);
         esp::Vec3 feet;
         if (!playerPosition(p, pc, feet)) continue;
@@ -286,6 +333,12 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
         if (!pl.local) {
             teams.insert(pl.team);
             if (sampleHp < 0 && pl.hpKnown) sampleHp = pl.hp;
+            d.otherTeams.push_back(pl.team);
+            d.otherHp.push_back(hpRaw);
+            if (remoteDumps < kRemoteDumps) {
+                d.dumps.push_back({kRemoteNames[remoteDumps], pc, 0x400});
+                ++remoteDumps;
+            }
         }
         res.snapshot.players.push_back(pl);
     }
@@ -308,8 +361,8 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
                   "players %zu  local team %d  other teams [%s]  hp sample %d  team filter %s  "
                   "view %.1f m%s  aspect %.2f (screen %.2f)",
                   res.snapshot.players.size(), int(res.snapshot.localTeam), teamList.c_str(), sampleHp,
-                  otherTeam ? "on" : "off", camScan.viewDist,
-                  camScan.viewDist > kNearCameraDistance ? " far" : "", aspectOf(camScan.proj), aspect);
+                  otherTeam ? "on" : "off", cam.viewDist, cam.viewDist > kNearCameraDistance ? " far" : "",
+                  aspectOf(cam.proj), aspect);
     res.info = line;
     res.ready = true;
     return res;

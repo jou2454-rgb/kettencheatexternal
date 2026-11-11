@@ -8,12 +8,13 @@
 #include "fonts/avatar.h"
 #include "fonts/esp.h"
 #include "fonts/pixeloperator.h"
+#include "dbg/log.hpp"
 #include "ui/ui_fonts.h"
 
 // IM_ASSERT hook declared in third_party/ImGui/imconfig.h. Logs and continues, so an
 // ImGui assert never takes the overlay down.
 void rise_imgui_assert_fail(const char* expr, const char* file, int line) {
-    std::fprintf(stderr, "ImGui assert failed: %s at %s:%d\n", expr, file, line);
+    dbg::line("ImGui assert failed: %s at %s:%d", expr, file, line);
 }
 
 // Menu and watermark font and texture (declared in ui/ui_fonts.h).

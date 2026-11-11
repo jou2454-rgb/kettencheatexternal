@@ -14,6 +14,7 @@
 #include <sys/ioctl.h>
 #include <vector>
 #include "imgui.h"
+#include "dbg/log.hpp"
 
 #define TOUCH_MODE 2
 
@@ -152,12 +153,18 @@ namespace touch {
                 snprintf(event_path, sizeof(event_path), "%s%s", path, ptr->d_name);
                 input _input(event_path, _screen_w, _screen_h);
                 if (_input.canBeUsed) {
+                    char devName[128] = {0};
+                    ioctl(_input.fd, EVIOCGNAME(sizeof(devName)), devName);
+                    dbg::line("touch device %s \"%s\": x 0..%d, y 0..%d, tracking id %s", event_path, devName,
+                              static_cast<int>(_input.absX.maximum), static_cast<int>(_input.absY.maximum),
+                              _input.trackingIDPresent ? "yes" : "no");
                     result = true;
                     inputs.push_back(_input);
                     std::thread(input_thread, _input).detach();
                 }
             }
         closedir(dir);
+        dbg::line("touch init: %s", result ? "usable device found" : "no usable device in /dev/input");
 
         return result;
     }

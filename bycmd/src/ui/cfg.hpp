@@ -17,6 +17,8 @@ namespace esp {
     inline bool health = true;
     inline bool distance = false;
     inline bool weapon = true;      // weapon icon under the box (weapon.hpp)
+    inline bool skeleton = false;   // bone lines from the player transform hierarchy (skeleton.hpp), off until verified on device
+    inline ImVec4 skeleton_col = ImVec4(1.f, 1.f, 1.f, 0.9f);
     inline int box_type = 0;
     inline float box_rounding = 0.f;
     // Interpolate enemy positions between game frames (one game frame of

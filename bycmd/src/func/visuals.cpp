@@ -11,6 +11,7 @@
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
 #include "../game/weapon.hpp"
+#include "../game/skeleton.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -98,7 +99,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon || cfg::esp::skeleton;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -119,6 +120,7 @@ void visuals::draw() {
         purge_missing(g_motion, live);
         purge_missing(player::g_transform_cache, live);
         purge_missing(weapon::g_cache, live);
+        purge_missing(skeleton::g_topo, live);
     }
 
     // Resolve at most one name per 100 ms. Name discovery touches several
@@ -377,6 +379,11 @@ void visuals::draw() {
                 dweapon(w.glyph, w.raw, cx, wy, std::clamp(900.f * inv_dist, 16.f, 34.f), bw * 2.f, 1.f);
             }
         }
+    }
+    if (cfg::esp::skeleton) {
+        crash::stage("esp-skeleton");
+        for (const auto& Enemy : frame_enemies)
+            skeleton::draw(Enemy.object, ViewMatrix, ProjectionMatrix, cfg::esp::skeleton_col);
     }
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000)) {

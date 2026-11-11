@@ -18,6 +18,7 @@
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
 #include "../other/status.hpp"
+#include "../game/weapon.hpp"
 #include <cmath>
 #include <cfloat>
 #include <string>
@@ -222,7 +223,8 @@ namespace ui::menu {
         const float row = 64.f * k;
         const float crow = 72.f * k;
         const float btn = 64.f * k;
-        const float ph = pad + row * 5.f + crow + 10.f * k + btn + 22.f * k;
+        const float info_h = 34.f * k;   // "my weapon: #N" calibration line
+        const float ph = pad + row * 5.f + crow + 10.f * k + btn + 6.f * k + info_h + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -295,6 +297,16 @@ namespace ui::menu {
         c.y += crow + 10.f * k;
         if (big_button(dl, "unload", c, cw, btn, a, k) && interactive) {
             status::g_quit_request = true;
+        }
+        c.y += btn + 6.f * k;
+        {
+            char line[48];
+            if (weapon::g_local_id > 0) snprintf(line, sizeof(line), "my weapon: #%d", weapon::g_local_id);
+            else snprintf(line, sizeof(line), "my weapon: -");
+            ImFont* f = menu_font();
+            const float fs = f->FontSize * 0.72f;
+            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, line);
+            dl->AddText(f, fs, ImVec2(c.x + (cw - ts.x) * 0.5f, c.y + (info_h - ts.y) * 0.5f), col(clr::text_dim, a), line);
         }
 
         color_popup(dl, &cfg::esp::box_col, p, pmax, a, k);

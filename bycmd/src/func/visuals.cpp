@@ -141,6 +141,7 @@ void visuals::draw() {
     const int LocalTeam = Local->team;
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
     const player::PlayerPose LocalPose = player::pose(*Local);
+    if (cfg::esp::weapon) weapon::g_local_id = weapon::resolve(*Local, true).id;  // for the id -> glyph calibration
     const Vector3 LocalPosition = LocalPose.feet;
     if (!LocalPose.valid || !std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
@@ -368,7 +369,7 @@ void visuals::draw() {
             if (w.valid) {
                 float wy = BoxMax.y + 4.f;
                 if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
-                dweapon(w.glyph, cx, wy, std::clamp(1100.f * inv_dist, 22.f, 40.f), 1.f);
+                dweapon(w.glyph, w.id, cx, wy, std::clamp(1100.f * inv_dist, 22.f, 40.f), font_sz, 1.f);
             }
         }
     }
@@ -542,11 +543,16 @@ void visuals::ddist(float dist, float x, float y, float sz, float a) {
     draw_text_outlined(dl, espFont, sz, tp, col, txt);
 }
 
-void visuals::dweapon(char glyph, float cx, float y, float sz, float a) {
-    if (!weaponFont || a < 0.01f || !glyph) return;
+void visuals::dweapon(char glyph, int id, float cx, float y, float sz, float text_sz, float a) {
+    if (a < 0.01f) return;
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const char txt[2] = {glyph, 0};
-    ImVec2 ts = weaponFont->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
+    // No glyph assigned to this id yet: show the raw id so it can be mapped.
+    ImFont* font = glyph && weaponFont ? weaponFont : espFont;
+    if (!font) return;
+    char txt[8];
+    if (glyph && weaponFont) { txt[0] = glyph; txt[1] = 0; }
+    else { snprintf(txt, sizeof(txt), "#%d", id); sz = text_sz; }
+    ImVec2 ts = font->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
     ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(y));
     ImU32 col = IM_COL32(
         static_cast<int>(cfg::esp::weapon_col.x * 255),
@@ -554,7 +560,7 @@ void visuals::dweapon(char glyph, float cx, float y, float sz, float a) {
         static_cast<int>(cfg::esp::weapon_col.z * 255),
         static_cast<int>(cfg::esp::weapon_col.w * 255 * a)
     );
-    draw_text_outlined(dl, weaponFont, sz, tp, col, txt);
+    draw_text_outlined(dl, font, sz, tp, col, txt);
 }
 
 void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {

@@ -2,158 +2,64 @@
 // Weapon icon resolution for the ESP.
 //
 // Icon font: includes/fonts/esp/weapon.h ("furry_coder-Weapon-Font"), one
-// glyph per weapon on the characters 0-9, A-O, a-z. The glyph assignment in
-// the table below was identified VISUALLY from the rendered font (knife and
-// rifle silhouettes); entries marked (?) are a best guess by shape.
+// glyph per weapon on the characters 0-9, A-O, a-z (legend at the bottom).
 //
-// Weapon source: dump.cs 1.1.0 exposes the player's WeaponPart component
-// (uyg, TypeInfo 0xCD34CE0) inside wwv.bvvg -> nzk.kevw (cew[]), the same
-// array transform_candidates() walks for mtc/bis. The *field layout* of uyg
-// is not established, so resolve() does not read a fixed offset: it scans the
-// component's object fields (depth 2) for a managed string whose lowercase
-// text matches a key in the table, exactly like player_name() finds the
-// nickname. This is best-effort and self-diagnosing: when nothing matches,
-// the strings that were found are logged ("[WEAPON] probe ...") so the real
-// field can be identified from bycmd.log and pinned here as v100 offsets.
+// Weapon source (established from bycmd.log, build 10885a5, 2026-11-11):
+//   player (odq) -> wwv.bvvg (nzk) -> kevw (cew[]) -> component of class uyg
+//   (WeaponPart, TypeInfo 0xCD34CE0). Raw dumps of five enemies:
+//     +0x30: 0x18 0x19 0x16 0x10 0x0b   differs per player, mirrored at +0x36
+//     +0x18: 1 while alive, 0 for the dead player whose +0x30 was also 0
+//   so uyg+0x30 (byte) is the weapon id. No weapon *name* string exists near
+//   the component (the previous string scan only found class/culture names),
+//   so the id -> glyph table below has to be filled from observation:
+//   the local player's id is logged on every change ("[WEAPON] local weapon
+//   id=N") and shown in the menu; until an id has a glyph the ESP draws "#N".
+//
+// Cost: one 8-byte read per enemy per 250 ms plus one parts-array walk per
+// 2 s. The earlier depth-3 string scan is gone (it stalled a frame for 7 s).
 // ================================================================================
 
 #pragma once
 
 #include "game.hpp"
-#include <string>
 #include <unordered_map>
-#include <cctype>
 
 namespace weapon {
+    // ---- uyg layout (observed, see header) ----
+    inline constexpr uint64_t uyg_active = 0x18;      // 1 = weapon shown, 0 = none/dead (hypothesis, consistent with dumps)
+    inline constexpr uint64_t uyg_weapon_id = 0x30;   // byte, observed
+    inline constexpr uint64_t uyg_weapon_id_mirror = 0x36; // same byte again, used as a consistency check
+    inline constexpr int k_max_id = 127;
+
     struct Info {
-        char glyph{0};
+        int id{0};          // raw uyg+0x30
+        char glyph{0};      // 0 = id known but no glyph assigned yet
         const char* name{nullptr};
-        bool valid{false};
+        bool valid{false};  // id read and consistent
     };
 
-    struct entry { const char* key; char glyph; const char* name; };
-
-    // key = lowercase, no spaces/dashes/underscores (see normalize()).
-    inline const entry k_table[] = {
-        // ---- knives (shapes, several are (?)) ----
-        {"m9bayonet",   '1', "M9 Bayonet"},
-        {"m9",          '1', "M9 Bayonet"},
-        {"bayonet",     '1', "M9 Bayonet"},
-        {"butterfly",   '2', "Butterfly"},
-        {"dualdaggers", '3', "Dual Daggers"},
-        {"daggers",     '3', "Dual Daggers"},
-        {"flip",        '4', "Flip Knife (?)"},
-        {"flipknife",   '4', "Flip Knife (?)"},
-        {"scorpion",    '5', "Scorpion (?)"},
-        {"stiletto",    '6', "Stiletto (?)"},
-        {"tanto",       '7', "Tanto (?)"},
-        {"karambit",    '8', "Karambit"},
-        {"jkommando",   '9', "Jkommando (?)"},
-        {"kunai",       'J', "Kunai"},
-        {"fang",        'K', "Fang (?)"},
-        {"standoff",    'L', "Standoff knife (?)"},
-        {"dagger",      'N', "Dagger (?)"},
-        {"katana",      'O', "Katana"},
-        // ---- utility ----
-        {"c4",          'D', "C4"},
-        {"bomb",        'D', "C4"},
-        {"he",          'E', "HE grenade"},
-        {"grenade",     'E', "HE grenade"},
-        {"hegrenade",   'E', "HE grenade"},
-        {"flash",       'F', "Flashbang"},
-        {"flashbang",   'F', "Flashbang"},
-        {"molotov",     'G', "Molotov"},
-        {"incendiary",  'H', "Incendiary"},
-        {"smoke",       'I', "Smoke"},
-        // ---- pistols ----
-        {"g22",         'a', "G22"},
-        {"glock",       'a', "G22"},
-        {"usp",         'b', "USP"},
-        {"usps",        'b', "USP"},
-        {"p350",        'c', "P350"},
-        {"p250",        'c', "P350"},
-        {"dualberettas",'d', "Dual Berettas"},
-        {"berettas",    'd', "Dual Berettas"},
-        {"tec9",        'e', "Tec-9"},
-        {"fiveseven",   'f', "Five-SeveN"},
-        {"57",          'f', "Five-SeveN"},
-        {"deagle",      'g', "Desert Eagle"},
-        {"deserteagle", 'g', "Desert Eagle"},
-        // ---- SMG ----
-        {"mac10",       'h', "MAC-10"},
-        {"ump45",       'i', "UMP45"},
-        {"ump",         'i', "UMP45"},
-        {"mp5",         'j', "MP5"},
-        {"mp7",         'k', "MP7"},
-        {"dualuzi",     'l', "Dual UZI (?)"},
-        {"uzi",         'l', "Dual UZI (?)"},
-        {"p90",         'm', "P90"},
-        // ---- rifles ----
-        {"fal",         'n', "FAL-type rifle (?)"},
-        {"g3",          'n', "FAL-type rifle (?)"},
-        {"famas",       'o', "FAMAS"},
-        {"akr12",       'p', "AKR-12"},
-        {"ak12",        'p', "AKR-12"},
-        {"m4",          'q', "M4"},
-        {"m4a4",        'q', "M4"},
-        {"m16",         'r', "M16"},
-        {"akr",         's', "AKR"},
-        {"ak47",        's', "AKR"},
-        {"scar",        't', "SCAR-type rifle (?)"},
-        {"m4a1",        'u', "M4A1 scoped (?)"},
-        {"aug",         'v', "Rifle (?)"},
-        {"m249",        'w', "LMG (?)"},
-        // ---- shotguns / snipers ----
-        {"spas",        'x', "SPAS-12"},
-        {"spas12",      'x', "SPAS-12"},
-        {"m40",         'A', "M40"},
-        {"sr25",        'B', "SR-25"},
-        {"awm",         'C', "AWM"},
-        {"awp",         'C', "AWM"},
-        {"m110",        'y', "DMR (?)"},
-        {"svd",         'z', "Scoped rifle (?)"},
+    // ---- id -> glyph. FILL FROM THE LOG. ----
+    // Procedure: run bycmd-debug.sh, buy / pick up a weapon, read
+    // "[WEAPON] local weapon id=N" (or the "my weapon: #N" line in the menu),
+    // add {N, '<glyph>', "<name>"} here, rebuild. Nothing below is verified yet.
+    struct id_entry { int id; char glyph; const char* name; };
+    inline constexpr id_entry k_id_table[] = {
+        // {24, 's', "AKR"},     // example only, not verified
+        {0, 0, nullptr},
     };
 
-    inline std::string normalize(const std::string& s) {
-        std::string out;
-        for (unsigned char ch : s) {
-            if (ch == ' ' || ch == '-' || ch == '_' || ch == '.') continue;
-            out.push_back(char(std::tolower(ch)));
-        }
-        return out;
-    }
-
-    inline const entry* lookup_key(const std::string& key) {
-        if (key.empty() || key.size() > 16) return nullptr;
-        for (const entry& e : k_table)
-            if (key == e.key) return &e;
+    inline const id_entry* lookup(int id) {
+        for (const id_entry& e : k_id_table)
+            if (e.id == id && e.glyph) return &e;
         return nullptr;
     }
 
-    // Whole string first ("AKR"), then alphanumeric tokens ("wpn_akr12_skin03(Clone)"
-    // -> wpn, akr12, skin03, clone). Tokens shorter than 2 are ignored.
-    inline const entry* match_text(const std::string& raw) {
-        if (const entry* e = lookup_key(normalize(raw))) return e;
-        std::string token;
-        const entry* found = nullptr;
-        auto flush = [&]() {
-            if (token.size() >= 2 && !found) found = lookup_key(token);
-            token.clear();
-        };
-        for (unsigned char ch : raw) {
-            if (std::isalnum(ch)) token.push_back(char(std::tolower(ch)));
-            else flush();
-        }
-        flush();
-        return found;
-    }
-
     struct cache_entry {
-        Info info{};
         uint64_t part{0};
-        long long checked_ms{0};
-        long long probe_ms{0};
+        long long part_ms{0};
+        long long read_ms{0};
         long long dump_ms{0};
+        Info info{};
     };
     inline std::unordered_map<uint64_t, cache_entry> g_cache;
 
@@ -172,130 +78,64 @@ namespace weapon {
         return 0;
     }
 
-    // Native UnityEngine.Object name. HYPOTHESIS: managed wrapper +0x10
-    // (m_CachedPtr) -> native object, native +0x30 -> char* name (the layout
-    // most Android Unity externals use for GameObject/Component names). Every
-    // step is validated; a miss returns an empty string.
-    inline std::string native_name(uint64_t managed) {
-        const uint64_t native = rpm<uint64_t>(managed + v100::unity_cached_ptr);
-        if (!plausible(native) || native < 0x10000) return {};
-        const uint64_t name_ptr = rpm<uint64_t>(native + 0x30);
-        if (!plausible(name_ptr) || name_ptr < 0x10000) return {};
-        char buf[48]{};
-        if (!mem_read(name_ptr, buf, sizeof(buf) - 1)) return {};
-        std::string out;
-        for (char ch : buf) {
-            if (ch == 0) break;
-            if (ch < 0x20 || ch > 0x7E) return {};
-            out.push_back(ch);
-        }
-        if (out.size() < 2 || out.size() >= sizeof(buf) - 1) return {};
-        return out;
-    }
-
-    inline int ImMaxBudget(int remaining) { return remaining < 200 ? 200 : remaining; }
-
-    struct scan_ctx {
-        uint64_t string_class{0};
-        int budget{0};              // remaining object reads
-        std::string seen[12];
-        int seen_count{0};
-        const char* source{""};
-    };
-
-    inline void note(scan_ctx& ctx, const char* kind, int field, int depth, const std::string& text) {
-        if (ctx.seen_count >= 12 || text.size() > 28) return;
-        char prefix[48];
-        std::snprintf(prefix, sizeof(prefix), "%s d%d+0x%x %s:", ctx.source, depth, 0x10 + field * 8, kind);
-        ctx.seen[ctx.seen_count++] = std::string(prefix) + text;
-    }
-
-    // Scan an object's first 24 reference fields for a weapon name: managed
-    // strings, native Unity names, then nested objects while depth remains.
-    inline const entry* scan_object(uint64_t object, int depth, scan_ctx& ctx) {
-        if (!obj_ptr(object) || ctx.budget <= 0) return nullptr;
-        --ctx.budget;
-        uint64_t fields[24]{};
-        if (!mem_read(object + 0x10, fields, sizeof(fields))) return nullptr;
-        for (int i = 0; i < 24; ++i) {
-            const uint64_t value = fields[i];
-            if (!obj_ptr(value)) continue;
-            const std::string text = read_managed_string(value, ctx.string_class);
-            if (!text.empty()) {
-                if (const entry* e = match_text(text)) return e;
-                note(ctx, "str", i, depth, text);
-                continue;
-            }
-            const std::string name = native_name(value);
-            if (!name.empty()) {
-                if (const entry* e = match_text(name)) return e;
-                note(ctx, "obj", i, depth, name);
-            }
-            if (depth > 1) {
-                if (const entry* e = scan_object(value, depth - 1, ctx)) return e;
-                if (ctx.budget <= 0) break;
-            }
-        }
-        return nullptr;
-    }
-
-    inline Info resolve(const player_snapshot& p) {
+    inline Info resolve(const player_snapshot& p, bool is_local = false) {
         cache_entry& c = g_cache[p.object];
         const long long now = diag::now_ms();
-        if (now - c.checked_ms < 500) return c.info;
-        c.checked_ms = now;
+        if (now - c.read_ms < 250) return c.info;
+        c.read_ms = now;
 
-        const uint64_t known_string = rpm<uint64_t>(proc::lib + v100::player_string_literal);
-        scan_ctx ctx;
-        ctx.string_class = plausible(known_string) ? rpm<uint64_t>(known_string) : 0;
-        ctx.budget = 600;
-
-        const uint64_t part = find_part(p.object);
-        const entry* e = nullptr;
-
-        // 1. WeaponPart itself, three levels deep.
-        if (part) { ctx.source = "uyg"; e = scan_object(part, 3, ctx); }
-        // 2. Presentation component chc (holds a uyg reference and animation state).
-        if (!e) {
-            const uint64_t chc = find_player_component(p.object, typeinfo(v100::presentation_typeinfo));
-            if (chc) { ctx.source = "chc"; ctx.budget = ImMaxBudget(ctx.budget); e = scan_object(chc, 2, ctx); }
+        if (!c.part || now - c.part_ms > 2000 || !exact_class(c.part, typeinfo(v100::weapon_part_typeinfo))) {
+            c.part = find_part(p.object);
+            c.part_ms = now;
         }
-        // 3. odq+0x88: the only unidentified pointer-sized slot between dvp (+0x80) and team (+0x90).
-        if (!e) {
-            const uint64_t slot = rpm<uint64_t>(p.object + 0x88);
-            if (obj_ptr(slot)) { ctx.source = "odq+88"; ctx.budget = ImMaxBudget(ctx.budget); e = scan_object(slot, 2, ctx); }
-        }
-
         Info next{};
-        if (e) { next.glyph = e->glyph; next.name = e->name; next.valid = true; }
-
-        if (next.valid && (!c.info.valid || next.glyph != c.info.glyph))
-            diag::log("WEAPON", "object=0x%llx part=0x%llx weapon=%s glyph='%c' via %s",
-                      (unsigned long long)p.object, (unsigned long long)part, next.name, next.glyph, ctx.source);
-        if (!next.valid && c.info.valid)
-            diag::log("WEAPON", "object=0x%llx weapon lost (part=0x%llx)", (unsigned long long)p.object, (unsigned long long)part);
-
-        if (!next.valid && diag::every(c.probe_ms, 5000)) {
-            std::string joined;
-            for (int i = 0; i < ctx.seen_count; ++i) { if (i) joined += " | "; joined += ctx.seen[i]; }
-            diag::log("WEAPON", "probe object=0x%llx part=0x%llx strclass=0x%llx no match; seen: %s",
-                      (unsigned long long)p.object, (unsigned long long)part,
-                      (unsigned long long)ctx.string_class, joined.empty() ? "(none)" : joined.c_str());
-        }
-        // Raw field dump of uyg once per 30 s per player: enough to pin the
-        // layout offline (pointers vs. small ints vs. floats).
-        if (part && diag::every(c.dump_ms, 30000)) {
-            uint64_t q[16]{};
-            if (mem_read(part, q, sizeof(q))) {
-                char line[16 * 19 + 1];
-                int used = 0;
-                for (int i = 0; i < 16 && used < int(sizeof(line)) - 20; ++i)
-                    used += std::snprintf(line + used, sizeof(line) - size_t(used), "%s%llx", i ? " " : "", (unsigned long long)q[i]);
-                diag::log("WEAPON", "uyg dump object=0x%llx part=0x%llx: %s", (unsigned long long)p.object, (unsigned long long)part, line);
+        if (c.part) {
+            uint8_t block[8]{};
+            if (mem_read(c.part + uyg_weapon_id, block, sizeof(block))) {
+                const int id = block[0];
+                const int mirror = block[uyg_weapon_id_mirror - uyg_weapon_id];
+                if (id > 0 && id <= k_max_id && id == mirror) {
+                    next.id = id;
+                    next.valid = true;
+                    if (const id_entry* e = lookup(id)) { next.glyph = e->glyph; next.name = e->name; }
+                }
+            }
+            if (diag::every(c.dump_ms, 60000)) {
+                uint64_t q[16]{};
+                if (mem_read(c.part, q, sizeof(q))) {
+                    char line[16 * 19 + 1];
+                    int used = 0;
+                    for (int i = 0; i < 16 && used < int(sizeof(line)) - 20; ++i)
+                        used += std::snprintf(line + used, sizeof(line) - size_t(used), "%s%llx", i ? " " : "", (unsigned long long)q[i]);
+                    diag::log("WEAPON", "uyg dump %s object=0x%llx part=0x%llx: %s", is_local ? "LOCAL" : "enemy",
+                              (unsigned long long)p.object, (unsigned long long)c.part, line);
+                }
             }
         }
+        if (next.id != c.info.id || next.valid != c.info.valid) {
+            if (is_local)
+                diag::log("WEAPON", "local weapon id=%d%s (uyg+0x30, part=0x%llx)", next.id,
+                          next.valid ? "" : " (none)", (unsigned long long)c.part);
+            else
+                diag::log("WEAPON", "object=0x%llx weapon id=%d%s glyph=%s", (unsigned long long)p.object, next.id,
+                          next.valid ? "" : " (none)", next.glyph ? next.name : "unassigned");
+        }
         c.info = next;
-        c.part = part;
         return c.info;
     }
+
+    // Last local-player id for the menu status line (0 = none).
+    inline int g_local_id = 0;
+
+    // ---- glyph legend (identified visually from the font; (?) = by shape only) ----
+    // knives:  1 M9 Bayonet, 2 Butterfly, 3 Dual Daggers, 4 Flip(?), 5 Scorpion(?),
+    //          6 Stiletto(?), 7 Tanto(?), 8 Karambit, 9 Jkommando(?), J Kunai,
+    //          K Fang(?), L Standoff knife(?), M Stiletto-type(?), N Dagger(?), O Katana
+    // utility: D C4, E HE grenade, F Flashbang, G Molotov, H Incendiary, I Smoke
+    // pistols: a G22, b USP, c P350, d Dual Berettas, e Tec-9, f Five-SeveN, g Desert Eagle
+    // SMG:     h MAC-10, i UMP45, j MP5, k MP7, l Dual UZI(?), m P90
+    // rifles:  n FAL-type(?), o FAMAS, p AKR-12, q M4, r M16, s AKR, t SCAR-type(?),
+    //          u scoped M4(?), v rifle(?), w LMG(?)
+    // other:   x SPAS-12, A M40, B SR-25, C AWM, y DMR(?), z scoped rifle(?)
+    // 0 = "no icon" placeholder glyph.
 }

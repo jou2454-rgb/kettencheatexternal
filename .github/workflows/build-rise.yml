@@ -30,6 +30,40 @@ jobs:
           cp ../run/run_rise.bat ../run/run_rise.sh libs/arm64-v8a/
           ls -l libs/arm64-v8a
 
+      - name: Build launcher APK (rise_esp inside, one button, root)
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          BT="$SDK/build-tools/$(ls "$SDK/build-tools" | sort -V | tail -1)"
+          PLAT="$SDK/platforms/$(ls "$SDK/platforms" | sort -V | tail -1)/android.jar"
+          echo "build-tools: $BT"
+          echo "platform: $PLAT"
+          W="$RUNNER_TEMP/launcher"
+          rm -rf "$W"
+          mkdir -p "$W/assets" "$W/classes" "$W/dex" "$W/out"
+          cp rise_esp/android/libs/arm64-v8a/rise_esp "$W/assets/rise_esp"
+          "$BT/aapt2" link -o "$W/base.apk" -I "$PLAT" \
+            --manifest rise_esp/launcher/AndroidManifest.xml \
+            -A "$W/assets" --min-sdk-version 26 --target-sdk-version 34 \
+            --version-code 1 --version-name 1.0
+          javac -encoding UTF-8 --release 8 -cp "$PLAT" -d "$W/classes" \
+            $(find rise_esp/launcher/src -name '*.java')
+          "$BT/d8" --lib "$PLAT" --min-api 26 --output "$W/dex" \
+            $(find "$W/classes" -name '*.class')
+          cp "$W/dex/classes.dex" "$W/classes.dex"
+          (cd "$W" && zip -q -j base.apk classes.dex)
+          keytool -genkeypair -keystore "$W/debug.jks" -storepass android -keypass android \
+            -alias debug -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=debug" >/dev/null 2>&1
+          "$BT/apksigner" sign --ks "$W/debug.jks" --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias debug --out "$W/out/rise-launcher.apk" "$W/base.apk"
+          ls -l "$W/out"
+
+      - name: Upload launcher APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rise-launcher-apk
+          path: ${{ runner.temp }}/launcher/out/rise-launcher.apk
+
       - name: Upload rise_esp (binary + run scripts)
         uses: actions/upload-artifact@v4
         with:

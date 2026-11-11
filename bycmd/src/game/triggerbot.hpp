@@ -132,9 +132,11 @@ namespace triggerbot {
         request(cfg::trigger::fire_x, cfg::trigger::fire_y);
     }
 
-    inline void save_fire(float x, float y) {
+    // Fire button + delay, one line: "x y delay_ms fire_set".
+    inline void save_settings() {
         if (FILE* f = std::fopen(kFireFile, "w")) {
-            std::fprintf(f, "%.1f %.1f\n", x, y);
+            std::fprintf(f, "%.1f %.1f %d %d\n", cfg::trigger::fire_x, cfg::trigger::fire_y,
+                         cfg::trigger::delay_ms, cfg::trigger::fire_set ? 1 : 0);
             std::fclose(f);
         }
     }
@@ -144,11 +146,14 @@ namespace triggerbot {
         g_loaded = true;
         if (FILE* f = std::fopen(kFireFile, "r")) {
             float x = 0.f, y = 0.f;
-            if (std::fscanf(f, "%f %f", &x, &y) == 2) {
+            int delay = cfg::trigger::delay_ms, set = 0;
+            const int n = std::fscanf(f, "%f %f %d %d", &x, &y, &delay, &set);
+            if (n >= 2) {
                 cfg::trigger::fire_x = x;
                 cfg::trigger::fire_y = y;
-                cfg::trigger::fire_set = true;
+                cfg::trigger::fire_set = (n >= 4) ? set != 0 : true;   // old files had only "x y"
             }
+            if (n >= 3 && delay >= 0 && delay <= 1000) cfg::trigger::delay_ms = delay;
             std::fclose(f);
         }
     }

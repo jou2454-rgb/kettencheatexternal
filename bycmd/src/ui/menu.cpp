@@ -135,6 +135,24 @@ namespace ui::menu {
             return press;
         }
 
+        // Small step button for the delay steppers. Returns true on tap.
+        bool mini_button(ImDrawList* dl, const char* label, const ImVec2& pos, float w, float h, float a, float k) {
+            const ImVec2 mx(pos.x + w, pos.y + h);
+            ImGuiIO& io = ImGui::GetIO();
+            const bool hov = inside(io.MousePos, pos, mx);
+            const bool press = !g_color_open && tapped(pos, mx);
+            const float ha = anim(std::string("mb_") + label, (hov && io.MouseDown[0] && !g_panel_dragging) ? 1.f : 0.f, 18.f);
+            const float r = 16.f * k;
+            dl->AddRectFilled(ImVec2(pos.x, pos.y + 3.f * k), ImVec2(mx.x, mx.y + 3.f * k), IM_COL32(0, 0, 0, int(70 * a)), r);
+            dl->AddRectFilled(pos, mx, col(lrp_col(clr::accent_dark, clr::accent_light, ha), a), r);
+            dl->AddRect(pos, mx, IM_COL32(255, 255, 255, int(25 * a)), r, 0, 1.f * k);
+            ImFont* f = menu_font();
+            const float fs = f->FontSize * 0.5f;
+            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, label);
+            dl->AddText(f, fs, ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(clr::text_light, a), label);
+            return press;
+        }
+
         // HSV picker to the right of the panel (or below it when there is no room).
         void color_popup(ImDrawList* dl, ImVec4* v, const ImVec2& pmin, const ImVec2& pmax, float a, float k) {
             if (!g_color_open) return;
@@ -221,7 +239,7 @@ namespace ui::menu {
         const float row = 64.f * k;
         const float crow = 72.f * k;
         const float btn = 64.f * k;
-        const float ph = pad + row * 4.f + crow + 10.f * k + 2.f * (btn + 6.f * k) + btn + 6.f * k + 16.f * k;
+        const float ph = pad + row * 4.f + crow + 10.f * k + (btn + 6.f * k) + (40.f * k + 56.f * k + 6.f * k) + btn + 6.f * k + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -283,7 +301,7 @@ namespace ui::menu {
                 cfg::trigger::fire_y = down.y;
                 cfg::trigger::fire_set = true;
                 cfg::trigger::arming = false;
-                triggerbot::save_fire(down.x, down.y);
+                triggerbot::save_settings();
             }
         }
         ImVec2 c(p.x + pad, p.y + pad);
@@ -302,15 +320,29 @@ namespace ui::menu {
             c.y += row;
         }
         {
-            char delay_label[32];
-            snprintf(delay_label, sizeof(delay_label), "delay: %d ms", cfg::trigger::delay_ms);
-            if (big_button(dl, delay_label, c, cw, btn, a, k) && interactive) {
-                static const int steps[] = {20, 40, 60, 80};
-                int next = 1;
-                for (int i = 0; i < 4; ++i) if (steps[i] == cfg::trigger::delay_ms) next = (i + 1) % 4;
-                cfg::trigger::delay_ms = steps[next];
+            // Custom delay in ms (0..1000): value line, then coarse and fine steps.
+            char delay_text[32];
+            snprintf(delay_text, sizeof(delay_text), "delay: %d ms", cfg::trigger::delay_ms);
+            ImFont* f = menu_font();
+            const float fs = f->FontSize * 0.72f;
+            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, delay_text);
+            dl->AddText(f, fs, ImVec2(c.x + (cw - ts.x) * 0.5f, c.y + (40.f * k - ts.y) * 0.5f), col(clr::text_dim, a), delay_text);
+            c.y += 40.f * k;
+            static const int steps[6] = {-50, -10, -1, 1, 10, 50};
+            static const char* labels[6] = {"-50", "-10", "-1", "+1", "+10", "+50"};
+            const float gap = 6.f * k;
+            const float mw = (cw - gap * 5.f) / 6.f, mh = 56.f * k;
+            for (int i = 0; i < 6; ++i) {
+                const ImVec2 mp(c.x + float(i) * (mw + gap), c.y);
+                if (mini_button(dl, labels[i], mp, mw, mh, a, k) && interactive) {
+                    int nd = cfg::trigger::delay_ms + steps[i];
+                    if (nd < 0) nd = 0;
+                    if (nd > 1000) nd = 1000;
+                    cfg::trigger::delay_ms = nd;
+                    triggerbot::save_settings();
+                }
             }
-            c.y += btn + 6.f * k;
+            c.y += mh + 6.f * k;
         }
         {
             const char* fire_label = "set fire button";

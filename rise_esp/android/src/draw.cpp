@@ -5,10 +5,10 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "dbg/log.hpp"
 #include "fonts/avatar.h"
 #include "fonts/esp.h"
 #include "fonts/pixeloperator.h"
-#include "dbg/log.hpp"
 #include "ui/ui_fonts.h"
 
 // IM_ASSERT hook declared in third_party/ImGui/imconfig.h. Logs and continues, so an
@@ -36,15 +36,26 @@ ANativeWindow* g_window = nullptr;
 GLuint g_avatar_gl = 0;
 int g_width = 0;
 int g_height = 0;
+SwapStats g_swap;
 
 bool initEgl() {
+    dbg::line("overlay: creating window %dx%d", g_width, g_height);
     g_window = android::ANativeWindowCreator::Create("RiseOverlay", g_width, g_height, false);
-    if (!g_window) return false;
+    if (!g_window) {
+        dbg::line("overlay: window creation failed");
+        return false;
+    }
     ANativeWindow_acquire(g_window);
     g_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (g_display == EGL_NO_DISPLAY) return false;
+    if (g_display == EGL_NO_DISPLAY) {
+        dbg::line("overlay: eglGetDisplay failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
     EGLint major = 0, minor = 0;
-    if (eglInitialize(g_display, &major, &minor) != EGL_TRUE) return false;
+    if (eglInitialize(g_display, &major, &minor) != EGL_TRUE) {
+        dbg::line("overlay: eglInitialize failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
     const EGLint cfgAttr[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
@@ -54,16 +65,37 @@ bool initEgl() {
     };
     EGLConfig config{};
     EGLint numConfig = 0;
-    if (eglChooseConfig(g_display, cfgAttr, &config, 1, &numConfig) != EGL_TRUE || numConfig < 1) return false;
+    if (eglChooseConfig(g_display, cfgAttr, &config, 1, &numConfig) != EGL_TRUE || numConfig < 1) {
+        dbg::line("overlay: eglChooseConfig failed (egl 0x%x, configs %d)",
+                  static_cast<unsigned>(eglGetError()), numConfig);
+        return false;
+    }
     EGLint visualId = 0;
-    if (eglGetConfigAttrib(g_display, config, EGL_NATIVE_VISUAL_ID, &visualId) != EGL_TRUE) return false;
-    if (ANativeWindow_setBuffersGeometry(g_window, 0, 0, visualId) != 0) return false;
+    if (eglGetConfigAttrib(g_display, config, EGL_NATIVE_VISUAL_ID, &visualId) != EGL_TRUE) {
+        dbg::line("overlay: eglGetConfigAttrib failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
+    if (ANativeWindow_setBuffersGeometry(g_window, 0, 0, visualId) != 0) {
+        dbg::line("overlay: ANativeWindow_setBuffersGeometry failed");
+        return false;
+    }
     const EGLint ctxAttr[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
     g_context = eglCreateContext(g_display, config, EGL_NO_CONTEXT, ctxAttr);
-    if (g_context == EGL_NO_CONTEXT) return false;
+    if (g_context == EGL_NO_CONTEXT) {
+        dbg::line("overlay: eglCreateContext failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
     g_surface = eglCreateWindowSurface(g_display, config, g_window, nullptr);
-    if (g_surface == EGL_NO_SURFACE) return false;
-    return eglMakeCurrent(g_display, g_surface, g_surface, g_context) == EGL_TRUE;
+    if (g_surface == EGL_NO_SURFACE) {
+        dbg::line("overlay: eglCreateWindowSurface failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
+    if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) != EGL_TRUE) {
+        dbg::line("overlay: eglMakeCurrent failed (egl 0x%x)", static_cast<unsigned>(eglGetError()));
+        return false;
+    }
+    dbg::line("overlay: EGL %d.%d, surface ready", major, minor);
+    return true;
 }
 
 // Watermark avatar: 128x128 RGBA8 from avatar.h. Needs the EGL context to be current.
@@ -82,6 +114,7 @@ void uploadAvatar() {
         g_avatar_gl = tex;
         g_avatar_tex = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(tex));
     } else {
+        dbg::line("overlay: avatar texture upload failed");
         glDeleteTextures(1, &tex);
     }
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -110,8 +143,13 @@ bool initImGui() {
                                               io.Fonts->GetGlyphRangesCyrillic());
     fontWm = io.Fonts->AddFontFromMemoryTTF(espFontData, sizeof(espFontData), std::round(54.f * k), &fc,
                                             io.Fonts->GetGlyphRangesCyrillic());
-    if (!fontMedium || !espFont || !fontMenu || !fontWm) return false;
+    if (!fontMedium || !espFont || !fontMenu || !fontWm) {
+        dbg::line("overlay: font atlas creation failed");
+        return false;
+    }
     uploadAvatar();
+    dbg::line("overlay: ImGui ready, menu font %.0f px, watermark font %.0f px", fontMenu->FontSize,
+              fontWm->FontSize);
     return true;
 }
 
@@ -124,7 +162,8 @@ android::ANativeWindowCreator::DisplayInfo displayInfo() {
 bool init(int width, int height) {
     g_width = width;
     g_height = height;
-    return initEgl() && initImGui();
+    if (!initEgl()) return false;
+    return initImGui();
 }
 
 void shutdown() {
@@ -159,7 +198,17 @@ void endFrame() {
     ImGui::Render();
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    eglSwapBuffers(g_display, g_surface);
+    const GLenum glError = glGetError();
+    if (glError != GL_NO_ERROR) {
+        ++g_swap.glErrors;
+        g_swap.lastGlError = static_cast<unsigned>(glError);
+    }
+    if (eglSwapBuffers(g_display, g_surface) != EGL_TRUE) {
+        ++g_swap.swapFailures;
+        g_swap.lastEglError = static_cast<unsigned>(eglGetError());
+    }
 }
+
+SwapStats swapStats() { return g_swap; }
 
 }  // namespace overlay

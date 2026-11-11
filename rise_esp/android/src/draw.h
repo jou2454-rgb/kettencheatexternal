@@ -15,6 +15,15 @@ namespace overlay {
 
 extern ImFont* espFont;
 
+// Presentation status for the log: failed eglSwapBuffers calls and GL errors of frames.
+struct SwapStats {
+    unsigned swapFailures = 0;
+    unsigned lastEglError = 0;
+    unsigned glErrors = 0;
+    unsigned lastGlError = 0;
+};
+SwapStats swapStats();
+
 android::ANativeWindowCreator::DisplayInfo displayInfo();
 bool init(int width, int height);   // landscape overlay: width >= height
 void shutdown();

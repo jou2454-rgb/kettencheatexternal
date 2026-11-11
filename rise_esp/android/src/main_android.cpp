@@ -42,7 +42,7 @@ namespace {
 
 constexpr const char* kDefaultPackage = "com.standrise.game";
 constexpr double kSummaryPeriod = 1.0;       // SUMMARY line every second
-constexpr double kDetailPeriod = 5.0;        // DETAIL lines (camera values) every 5 s
+constexpr double kDetailPeriod = 5.0;        // DETAIL lines (camera values, players) every 5 s
 constexpr double kDumpPeriodMissing = 20.0;  // memory dump while something is missing
 constexpr double kDumpPeriodReady = 60.0;    // memory dump sample while ready
 
@@ -417,6 +417,36 @@ int main(int argc, char** argv) {
                 }
                 dbg::line("DETAIL other players: teams %s, hp raw %s", fmtTeams(d.otherTeams).c_str(),
                           fmtHp(d.otherHp).c_str());
+                if (res.ready) {
+                    // Why each of the first three other players is or is not drawn: distance, screen
+                    // position (in front of the camera or not) and the primitives the ESP builds for it.
+                    const esp::Vec3 cp = res.snapshot.cameraPos;
+                    const float fw = static_cast<float>(W);
+                    const float fh = static_cast<float>(H);
+                    dbg::line("DETAIL camera position (%.3f %.3f %.3f), overlay %dx%d, players %zu", cp.x, cp.y,
+                              cp.z, W, H, res.snapshot.players.size());
+                    size_t shown = 0;
+                    for (const esp::Player& pl : res.snapshot.players) {
+                        if (pl.local) continue;
+                        if (shown == 3) break;
+                        ++shown;
+                        esp::Snapshot one = res.snapshot;
+                        one.players.assign(1, pl);
+                        esp::DrawList tmp;
+                        esp::buildEsp(one, espConfigFromMenu(), tmp);
+                        esp::Vec2 headS{};
+                        esp::Vec2 feetS{};
+                        const bool headFront = esp::worldToScreen(res.snapshot.viewProj, pl.head, fw, fh, headS, true);
+                        const bool feetFront = esp::worldToScreen(res.snapshot.viewProj, pl.feet, fw, fh, feetS, true);
+                        dbg::line("DETAIL player 0x%llx: team %d (team filter %s), hp %d (known %d), %.1f m away, "
+                                  "head (%.0f %.0f) %s, feet (%.0f %.0f) %s, primitives %zu",
+                                  ULL(pl.id), pl.team, res.snapshot.teamFilter ? "on" : "off", pl.hp,
+                                  pl.hpKnown ? 1 : 0, static_cast<double>(esp::length(pl.feet - cp)),
+                                  static_cast<double>(headS.x), static_cast<double>(headS.y),
+                                  headFront ? "in front" : "behind camera", static_cast<double>(feetS.x),
+                                  static_cast<double>(feetS.y), feetFront ? "in front" : "behind camera", tmp.size());
+                    }
+                }
             }
         }
 
@@ -437,15 +467,18 @@ int main(int argc, char** argv) {
             else if (pid <= 0) state = "no game";
             else if (base == 0) state = "no libil2cpp";
             else if (didRead) state = res.ready ? "ready" : oneLine(res.missing);
+            const overlay::SwapStats sw = overlay::swapStats();
             const rise::Diag& d = res.diag;
             dbg::line("SUMMARY fps %.0f, frame %.1f/%.1f ms, orient %u, landscape %d, pid %d, base 0x%llx, %s, "
                       "mgr 0x%llx, lpc 0x%llx, feet (%.2f %.2f %.2f), native 0x%llx, drawn %d, "
-                      "touch downs %u last (%.0f %.0f), alpha %.2f, menu %d, state: %s",
+                      "touch downs %u last (%.0f %.0f), alpha %.2f, menu %d, swap fail %u (egl 0x%x), "
+                      "gl err %u (0x%x), state: %s",
                       static_cast<double>(framesInPeriod) / span, frameSum / framesInPeriod, frameMax, orientation,
                       landscape ? 1 : 0, pid, ULL(base), scanText, ULL(d.manager), ULL(d.localPc),
                       d.localFeet.x, d.localFeet.y, d.localFeet.z, ULL(d.nativeCam), drawnPrims, touchDowns,
                       static_cast<double>(touchX), static_cast<double>(touchY), static_cast<double>(alpha),
-                      ui::bar::g_open ? 1 : 0, state.c_str());
+                      ui::bar::g_open ? 1 : 0, sw.swapFailures, sw.lastEglError, sw.glErrors, sw.lastGlError,
+                      state.c_str());
             lastSummary = now;
             frameSum = 0.0;
             frameMax = 0.0;

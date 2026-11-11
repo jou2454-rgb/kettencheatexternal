@@ -12,7 +12,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -211,9 +214,27 @@ void dumpBlocks(const mem::Process& proc, const rise::Diag& d, const char* reaso
                       b.size, ok ? "" : " (read failed)");
         summary += item;
     }
-    const bool written = dbg::writeDump(blocks.data(), blocks.size());
-    dbg::line("DUMP (%s): %zu block(s) %s: %s", reason, blocks.size(), written ? "written" : "NOT written",
+    const bool queued = dbg::writeDump(blocks.data(), blocks.size());
+    dbg::line("DUMP (%s): %zu block(s) %s: %s", reason, blocks.size(), queued ? "queued for rise_dump.bin" : "NOT queued",
               summary.c_str());
+}
+
+// Display info comes from a separate thread: the binder call to the compositor can block for seconds
+// (screen off, transitions), and the render loop must never wait for it.
+std::atomic<uint32_t> g_orientation{0};
+std::atomic<int> g_displayW{0};
+std::atomic<int> g_displayH{0};
+
+void displayPoller() {
+    for (;;) {
+        const auto info = overlay::displayInfo();
+        if (info.width > 0 && info.height > 0) {
+            g_displayW.store(info.width);
+            g_displayH.store(info.height);
+            g_orientation.store(static_cast<uint32_t>(info.orientation));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
 }
 
 }  // namespace
@@ -246,6 +267,9 @@ int main(int argc, char** argv) {
     uint32_t orientation = info.orientation;
     const bool touchOk = touch::init(W, H, static_cast<uint8_t>(orientation));
     if (!touchOk) dbg::line("touch: no device readable in /dev/input, the menu cannot be operated");
+
+    g_orientation.store(orientation);
+    std::thread(displayPoller).detach();
 
     mem::Process proc;
     int pid = 0;
@@ -283,13 +307,12 @@ int main(int argc, char** argv) {
         frameMax = std::max(frameMax, frameMs);
         ++framesInPeriod;
 
-        // Rotation is read every 16 frames (about 0.1 s); a change switches the touch mapping.
-        if (frame % 16 == 0) {
-            const auto nowInfo = overlay::displayInfo();
-            const uint32_t current = static_cast<uint32_t>(nowInfo.orientation);
-            if (nowInfo.width > 0 && nowInfo.height > 0 && current != orientation) {
+        // Rotation comes from the display thread; a change switches the touch mapping.
+        {
+            const uint32_t current = g_orientation.load();
+            if (current != orientation) {
                 dbg::line("EVENT display orientation %u -> %u (display %dx%d)", orientation, current,
-                          nowInfo.width, nowInfo.height);
+                          g_displayW.load(), g_displayH.load());
                 orientation = current;
                 touch::updateOrientation(static_cast<uint8_t>(orientation));
             }
@@ -414,6 +437,8 @@ int main(int argc, char** argv) {
                           "other entries not PlayerController %zu",
                           ULL(d.pmKlass), d.pmName.c_str(), ULL(d.pcKlass), d.pcName.c_str(), ULL(d.localOffset),
                           d.skippedEntries);
+                dbg::line("DETAIL players: %zu in the match, %zu with a character and camera; field states %s",
+                          d.playersInMatch, d.withCharacter, d.candidateStates.c_str());
                 dbg::line("DETAIL local feet (%.3f %.3f %.3f), valid %d", d.localFeet.x, d.localFeet.y,
                           d.localFeet.z, d.haveLocalFeet ? 1 : 0);
                 dbg::line("DETAIL camera scan: perspective %d, rigid %d, nearest rigid %.3f m, view %.3f m%s, "
@@ -508,5 +533,6 @@ int main(int argc, char** argv) {
     touch::shutdown();
     overlay::shutdown();
     dbg::line("EXIT clean");
+    dbg::flush();
     return 0;
 }

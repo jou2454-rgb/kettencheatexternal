@@ -368,9 +368,9 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
         return res;
     }
 
-    uint64_t localPc = 0;
-    uint64_t localOffset = 0;
-    d.manager = findPlayerManager(p, d.pmKlass, d.pcKlass, localPc, localOffset);
+    uint64_t managerLocal = 0;
+    uint64_t managerLocalOffset = 0;
+    d.manager = findPlayerManager(p, d.pmKlass, d.pcKlass, managerLocal, managerLocalOffset);
     if (!d.manager) {
         const ScanStats& s = g_scan;
         char msg[320];
@@ -383,10 +383,46 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
         res.missing = msg;
         return res;
     }
-    d.localPc = localPc;
-    d.localOffset = localOffset;
     d.dumps.push_back({"manager", d.manager, 0x200});
-    d.dumps.push_back({"local_pc", d.localPc, 0x400});
+    d.altPc = readPtr(p, d.manager + kPM_LocalPlayerAlt);
+    if (managerLocal) d.dumps.push_back({"pc_field_0x68", managerLocal, 0x400});
+    if (d.altPc) d.dumps.push_back({"pc_field_0x70", d.altPc, 0x400});
+
+    size_t skipped = 0;
+    const std::vector<uint64_t> pcs = dictValues(p, readPtr(p, d.manager + kPM_Players), d.pcKlass, skipped);
+    d.skippedEntries = skipped;
+    d.playersInMatch = pcs.size();
+
+    // The local player is the PlayerController with a movement controller and a camera (only the
+    // local player owns a PlayerMainCamera). The manager's two fields are tried first, then the
+    // Players entries; the first one that qualifies is ours.
+    auto hasCharacter = [&](uint64_t pc) {
+        return pc != 0 && readPtr(p, pc + kPC_Movement) != 0 && readPtr(p, pc + kPC_MainCamera) != 0;
+    };
+    auto stateOf = [&](uint64_t pc) {
+        if (!pc) return std::string("(none)");
+        return std::string(readPtr(p, pc + kPC_Movement) ? "M" : "-") +
+               (readPtr(p, pc + kPC_MainCamera) ? "C" : "-");
+    };
+    d.candidateStates = "0x68 " + stateOf(managerLocal) + ", 0x70 " + stateOf(d.altPc);
+    for (const uint64_t pc : pcs) {
+        if (hasCharacter(pc)) ++d.withCharacter;
+    }
+    uint64_t chosen = 0;
+    for (const uint64_t pc : {managerLocal, d.altPc}) {
+        if (!chosen && hasCharacter(pc)) chosen = pc;
+    }
+    for (const uint64_t pc : pcs) {
+        if (!chosen && hasCharacter(pc)) chosen = pc;
+    }
+    if (!chosen) {
+        res.missing = "  no player with a character and a camera yet: " + d.candidateStates +
+                      ", players in the match " + std::to_string(d.playersInMatch) + "\n";
+        return res;
+    }
+    d.localPc = chosen;
+    d.localOffset = chosen == managerLocal ? kPM_LocalPlayer : (chosen == d.altPc ? kPM_LocalPlayerAlt : 0);
+    if (chosen != managerLocal && chosen != d.altPc) d.dumps.push_back({"local_pc", d.localPc, 0x400});
 
     d.movement = readPtr(p, d.localPc + kPC_Movement);
     d.translation = d.movement ? readPtr(p, d.movement + kMC_TranslationData) : 0;
@@ -433,10 +469,6 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
     res.snapshot.cameraPos = cameraPosition(cam.view);
     res.snapshot.localTeam = p.read<uint8_t>(d.localPc + kPC_Team);
 
-    size_t skipped = 0;
-    const std::vector<uint64_t> pcs =
-        dictValues(p, readPtr(p, d.manager + kPM_Players), d.pcKlass, skipped);
-    d.skippedEntries = skipped;
     static const char* const kRemoteNames[kRemoteDumps] = {"remote_pc0", "remote_pc1"};
     std::set<int> teams;
     int sampleHp = -1;

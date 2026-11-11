@@ -27,6 +27,10 @@ struct Diag {
     uint64_t localPc = 0;          // local PlayerController
     uint64_t localOffset = 0;      // manager field that holds the local player (0x68 or 0x70)
     size_t skippedEntries = 0;     // Players entries that are not PlayerController objects
+    uint64_t altPc = 0;            // the manager's other PlayerController field (0x70)
+    size_t playersInMatch = 0;     // PlayerController entries in the Players dictionary
+    size_t withCharacter = 0;      // of those, with a movement controller and a camera
+    std::string candidateStates;   // "0x68 M-, 0x70 --" (M: movement set, C: camera set)
     uint64_t movement = 0;         // MovementController of the local player
     uint64_t translation = 0;      // its translationData
     uint64_t mainCam = 0;          // PlayerMainCamera

@@ -27,8 +27,8 @@
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
 // bycmd: release builds define NDEBUG, which turned every ImGui assertion
 // into silence. Log the failed expression (rate limited) and keep running.
-void bycmd_imgui_assert_fail(const char* expr, const char* file, int line);
-#define IM_ASSERT(_EXPR)  do { if (!(_EXPR)) bycmd_imgui_assert_fail(#_EXPR, __FILE__, __LINE__); } while (0)
+void rise_imgui_assert_fail(const char* expr, const char* file, int line);
+#define IM_ASSERT(_EXPR)  do { if (!(_EXPR)) rise_imgui_assert_fail(#_EXPR, __FILE__, __LINE__); } while (0)
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.

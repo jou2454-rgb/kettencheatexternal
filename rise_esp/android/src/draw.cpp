@@ -1,7 +1,15 @@
 #include "draw.h"
 
+#include <cstdio>
+
 #include "fonts/esp.h"
 #include "fonts/pixeloperator.h"
+
+// IM_ASSERT hook declared in third_party/ImGui/imconfig.h. Logs and continues, so an
+// ImGui assert never takes the overlay down.
+void rise_imgui_assert_fail(const char* expr, const char* file, int line) {
+    std::fprintf(stderr, "ImGui assert failed: %s at %s:%d\n", expr, file, line);
+}
 
 namespace overlay {
 

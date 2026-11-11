@@ -301,7 +301,8 @@ namespace ui::menu {
         c.y += btn + 6.f * k;
         {
             char line[48];
-            if (weapon::g_local_id > 0) snprintf(line, sizeof(line), "my weapon: #%d", weapon::g_local_id);
+            if (weapon::g_local_name) snprintf(line, sizeof(line), "my weapon: %s", weapon::g_local_name);
+            else if (weapon::g_local_id > 0) snprintf(line, sizeof(line), "my weapon: ? (inst %d)", weapon::g_local_id);
             else snprintf(line, sizeof(line), "my weapon: -");
             ImFont* f = menu_font();
             const float fs = f->FontSize * 0.72f;

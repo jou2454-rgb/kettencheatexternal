@@ -188,7 +188,7 @@ namespace skeleton {
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
         const ImU32 outline = IM_COL32(0, 0, 0, 170);
         const ImU32 col = IM_COL32(int(color.x * 255), int(color.y * 255), int(color.z * 255), int(color.w * 255));
-        for (const auto& s : segments) dl->AddLine(s.first, s.second, outline, 3.f);
+        for (const auto& s : segments) dl->AddLine(s.first, s.second, outline, 2.f);
         for (const auto& s : segments) dl->AddLine(s.first, s.second, col, 1.2f);
     }
 }

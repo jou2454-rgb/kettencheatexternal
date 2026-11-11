@@ -367,14 +367,15 @@ void visuals::draw() {
             const auto found = g_name_cache.find(Enemy.object);
             const char* label = found != g_name_cache.end() && !found->second.name.empty()
                 ? found->second.name.c_str() : "Enemy";
-            dnick(label, BoxMax, cx, font_sz, 1.f);
+            // Nick sits above the head: dnick puts its top at box_max.y + 4.
+            const ImVec2 nick_ts = espFont ? espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, label) : ImVec2(0.f, 0.f);
+            dnick(label, ImVec2(BoxMax.x, BoxMin.y - 8.f - nick_ts.y), cx, font_sz, 1.f);
         }
         if (cfg::esp::distance) ddist(Enemy.distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
         if (cfg::esp::weapon) {
             const weapon::Info w = weapon::resolve(*Enemy.snap);
             if (w.valid && w.glyph) {
-                float wy = BoxMax.y + 4.f;
-                if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
+                const float wy = BoxMax.y + 4.f;
                 // Icon never wider than the box and never taller than a quarter of it.
                 dweapon(w.glyph, w.raw, cx, wy, std::clamp(900.f * inv_dist, 16.f, 34.f), bw * 2.f, 1.f);
             }
@@ -506,17 +507,6 @@ void visuals::dhp(int hp, int max_hp, const ImVec2& t, const ImVec2& b, float bo
         dl->AddRectFilledMultiColor(ImVec2(bx, fill_top), ImVec2(bx + bw, bot_y), col_top, col_top, col_bot, col_bot);
     }
 
-    if (hp < max_hp && espFont && bh > 20.f) {
-        char txt[8];
-        snprintf(txt, sizeof(txt), "%d", hp);
-        float fs = 10.f;
-        ImVec2 ts = espFont->CalcTextSizeA(fs, FLT_MAX, 0.f, txt);
-        float tx = roundf(bx + (bw - ts.x) * 0.5f);
-        float ty = roundf(fill_top - ts.y * 0.5f);
-        if (ty < top_y) ty = top_y;
-        if (ty + ts.y > bot_y) ty = bot_y - ts.y;
-        draw_text_outlined(dl, espFont, fs, ImVec2(tx, ty), IM_COL32(255, 255, 255, (int)(255 * a)), txt);
-    }
 }
 
 void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz, float a) {

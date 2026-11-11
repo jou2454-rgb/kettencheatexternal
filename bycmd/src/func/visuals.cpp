@@ -10,6 +10,7 @@
 #include "../game/math.hpp"
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
+#include "../game/weapon.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -99,7 +100,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::weapon;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -119,6 +120,7 @@ void visuals::draw() {
         purge_missing(g_last_hp, live);
         purge_missing(g_motion, live);
         purge_missing(player::g_transform_cache, live);
+        purge_missing(weapon::g_players, live);
     }
 
     // Resolve at most one name per 100 ms. Name discovery touches several
@@ -166,6 +168,7 @@ void visuals::draw() {
         bool has_head{false};
         int hp{0};
         int max_hp{100};
+        int weapon{-1};
         float distance{0.f};
     };
     std::vector<enemy_frame> frame_enemies;
@@ -209,6 +212,7 @@ void visuals::draw() {
         e.snap = &p;
         e.hp = Health.hp;
         e.max_hp = Health.max_hp;
+        if (cfg::esp::weapon) e.weapon = weapon::active_id(p);
         if (!read_enemy_pose(e)) continue;
         ++positioned;
         e.distance = calculate_distance(e.position, LocalPosition);
@@ -361,6 +365,12 @@ void visuals::draw() {
             const char* label = found != g_name_cache.end() && !found->second.name.empty()
                 ? found->second.name.c_str() : "Enemy";
             dnick(label, BoxMax, cx, font_sz, 1.f);
+        }
+        if (cfg::esp::weapon) {
+            if (const char* weapon_name = weapon::name(Enemy.weapon)) {
+                const float y = BoxMax.y + 4.f + (cfg::esp::name && espFont ? font_sz + 2.f : 0.f);
+                dweapon(weapon_name, cx, y, font_sz, 1.f);
+            }
         }
     }
     // PROBE (read-only, opt-in): while /data/local/tmp/bycmd_probe exists, dumps the szi bytes
@@ -539,6 +549,19 @@ void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz,
         static_cast<int>(cfg::esp::name_col.w * 255 * a)
     );
     draw_text_outlined(dl, espFont, sz, tp, col, name);
+}
+
+void visuals::dweapon(const char* label, float cx, float y, float sz, float a) {
+    if (!espFont || a < 0.01f || !label) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImVec2 ts = espFont->CalcTextSizeA(sz, FLT_MAX, 0.f, label);
+    const ImU32 col = IM_COL32(
+        static_cast<int>(cfg::esp::box_col.x * 255),
+        static_cast<int>(cfg::esp::box_col.y * 255),
+        static_cast<int>(cfg::esp::box_col.z * 255),
+        static_cast<int>(cfg::esp::box_col.w * 255 * a)
+    );
+    draw_text_outlined(dl, espFont, sz, ImVec2(roundf(cx - ts.x * 0.5f), roundf(y)), col, label);
 }
 
 void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {

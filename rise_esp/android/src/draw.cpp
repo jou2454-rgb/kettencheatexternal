@@ -148,8 +148,7 @@ bool initImGui() {
         return false;
     }
     uploadAvatar();
-    dbg::line("overlay: ImGui ready, menu font %.0f px, watermark font %.0f px", fontMenu->FontSize,
-              fontWm->FontSize);
+    dbg::line("overlay: ImGui ready, overlay scale %.3f (menu and watermark fonts from it)", k);
     return true;
 }
 

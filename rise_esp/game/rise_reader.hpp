@@ -19,9 +19,15 @@ struct DumpBlock {
 
 // Values seen during one read, for the log. Valid as far as the read got.
 struct Diag {
-    uint64_t manager = 0;          // PlayerManager instance
+    uint64_t pmKlass = 0;          // PlayerManager class pointer (TypeInfo slot)
+    uint64_t pcKlass = 0;          // PlayerController class pointer (TypeInfo slot)
+    std::string pmName;            // class name read from the class structure, to confirm the pointer
+    std::string pcName;
+    uint64_t manager = 0;          // PlayerManager instance (validated)
     uint64_t localPc = 0;          // local PlayerController
-    uint64_t movement = 0;         // its MovementController
+    uint64_t localOffset = 0;      // manager field that holds the local player (0x68 or 0x70)
+    size_t skippedEntries = 0;     // Players entries that are not PlayerController objects
+    uint64_t movement = 0;         // MovementController of the local player
     uint64_t translation = 0;      // its translationData
     uint64_t mainCam = 0;          // PlayerMainCamera
     uint64_t camera = 0;           // managed Camera
@@ -60,9 +66,17 @@ struct ScanStats {
     uint64_t addr = 0;           // next address to read
     uint64_t bytesTotal = 0;     // bytes read by the search since start
     uint64_t passes = 0;         // passes started
-    uint64_t hits = 0;           // manager candidates accepted
+    uint64_t hits = 0;           // PlayerManager instances accepted
+    uint64_t headerHits = 0;     // words equal to the PlayerManager class pointer
+    uint64_t rejMonitor = 0;     // rejected: monitor word is not a heap pointer
+    uint64_t rejFlag = 0;        // rejected: bool field at 0x60 is not 0 or 1
+    uint64_t rejPlayers = 0;     // rejected: Players dictionary is not plausible
+    uint64_t rejLocal = 0;       // rejected: no local player that is a PlayerController
 };
 ScanStats managerScanStats();
+
+// Build id of a module (libil2cpp.so) read from its ELF notes in the process, as hex.
+std::string libBuildId(const mem::Process& p, uint64_t base);
 
 // gameBase: base address of the il2cpp module (libil2cpp.so) in the target process.
 ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int screenH);

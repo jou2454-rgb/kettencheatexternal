@@ -21,25 +21,53 @@ constexpr uint64_t kScanBytesPerFrame = 4ull << 20;    // PlayerManager search b
 constexpr int kRescanFrames = 600;                     // idle frames before the next full search (~5 s)
 constexpr float kMaxHealth = 1000.f;                   // larger health values are not believed
 constexpr size_t kRemoteDumps = 2;                     // remote player objects dumped per read
+constexpr uint64_t kPM_LocalPlayerAlt = 0x70;          // second PlayerController field of PlayerManager
 
 ScanStats g_scan;   // PlayerManager search statistics, see managerScanStats()
 
-// Values of Dictionary<int, PlayerController> (live entries only).
-std::vector<uint64_t> dictValues(const mem::Process& p, uint64_t dict) {
+// Pointers can carry tag bits in the top byte on this device: only the 48 address bits are used.
+uint64_t untag(uint64_t v) { return v & 0x0000FFFFFFFFFFFFULL; }
+// Heap range of the game on this device (heap addresses seen so far: 0x7b..., 0x7e...).
+bool heapLike(uint64_t v) { return v >= 0x7000000000ULL && v < 0x8000000000ULL; }
+uint64_t readPtr(const mem::Process& p, uint64_t addr) { return untag(p.read<uint64_t>(addr)); }
+
+// Name of a class from its class structure (Il2CppClass::name at +0x10), or why it is unknown.
+std::string className(const mem::Process& p, uint64_t klass) {
+    if (!klass) return "(no class pointer)";
+    const uint64_t name = readPtr(p, klass + 0x10);
+    if (name < 0x1000) return "(bad name pointer)";
+    char buf[32] = {0};
+    if (!p.read(name, buf, sizeof(buf))) return "(name unreadable)";
+    buf[sizeof(buf) - 1] = 0;
+    std::string s;
+    for (size_t i = 0; buf[i]; ++i) {
+        const unsigned char c = static_cast<unsigned char>(buf[i]);
+        if (c < 32 || c > 126) return "(not text)";
+        s.push_back(buf[i]);
+    }
+    return s;
+}
+
+// Values of Dictionary<int, PlayerController> that are PlayerController objects (live entries).
+// Entries whose object has another class are counted in skipped.
+std::vector<uint64_t> dictValues(const mem::Process& p, uint64_t dict, uint64_t pcKlass, size_t& skipped) {
     std::vector<uint64_t> out;
-    const uint64_t entries = p.read<uint64_t>(dict + kDict_Entries);
+    const uint64_t entries = readPtr(p, dict + kDict_Entries);
     const int32_t count = p.read<int32_t>(dict + kDict_Count);
-    if (!entries || count <= 0 || count > 4096) return out;
+    if (!heapLike(entries) || count <= 0 || count > 4096) return out;
     for (int32_t i = 0; i < count; ++i) {
         const uint64_t e = entries + kArrayVector + static_cast<uint64_t>(i) * kEntry_Size;
         if (p.read<int32_t>(e + kEntry_Next) < -1) continue;     // free slot
-        const uint64_t value = p.read<uint64_t>(e + kEntry_Value);
-        if (value) out.push_back(value);
+        const uint64_t value = readPtr(p, e + kEntry_Value);
+        if (!value) continue;
+        if (readPtr(p, value) != pcKlass) {
+            ++skipped;
+            continue;
+        }
+        out.push_back(value);
     }
     return out;
 }
-
-bool plausiblePtr(uint64_t v) { return v >= 0x1000 && v < (1ULL << 47); }
 
 // State of the PlayerManager search that continues across frames.
 struct ManagerScan {
@@ -50,12 +78,49 @@ struct ManagerScan {
     int idle = 0;                // frames to wait before the next pass
 };
 
-// PlayerManager instance. The class pointer is read from the TypeInfo slot, then the writable
-// memory is searched for an object header that points to it. The search walks at most
+// Result of checking a PlayerManager candidate. The layout is from dump.cs: monitor word (+0x8),
+// a bool at +0x60, the Players dictionary at +0x20 and the local player at +0x68 or +0x70. The
+// local player is accepted only when its object is a PlayerController, which rules out a match
+// on the class pointer alone.
+enum class Check { Ok, Monitor, Flag, Players, Local };
+
+Check checkManager(const mem::Process& p, uint64_t obj, uint64_t pcKlass, uint64_t& localPc,
+                   uint64_t& localOffset) {
+    const uint64_t monitor = readPtr(p, obj + 8);
+    if (monitor && !heapLike(monitor)) return Check::Monitor;
+    if (p.read<uint8_t>(obj + 0x60) > 1) return Check::Flag;
+    const uint64_t dict = readPtr(p, obj + kPM_Players);
+    if (!heapLike(dict)) return Check::Players;
+    const int32_t count = p.read<int32_t>(dict + kDict_Count);
+    if (count < 0 || count > 4096) return Check::Players;
+    for (const uint64_t off : {kPM_LocalPlayer, kPM_LocalPlayerAlt}) {
+        const uint64_t pc = readPtr(p, obj + off);
+        if (heapLike(pc) && readPtr(p, pc) == pcKlass) {
+            localPc = pc;
+            localOffset = off;
+            return Check::Ok;
+        }
+    }
+    return Check::Local;
+}
+
+void countCheck(Check c) {
+    switch (c) {
+        case Check::Monitor: ++g_scan.rejMonitor; break;
+        case Check::Flag: ++g_scan.rejFlag; break;
+        case Check::Players: ++g_scan.rejPlayers; break;
+        case Check::Local: ++g_scan.rejLocal; break;
+        case Check::Ok: break;
+    }
+}
+
+// PlayerManager instance. Writable memory is searched for words equal to the PlayerManager class
+// pointer (tag bits removed); each hit is checked by checkManager(). The search walks at most
 // kScanBytesPerFrame per call and continues on the next frame, so a full pass never stalls the
-// overlay loop. A pass without a match is repeated after kRescanFrames. The result is cached
-// until the object stops pointing to the class (match ended).
-uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
+// overlay loop. A pass without an accepted candidate is repeated after kRescanFrames. The accepted
+// object is re-checked every frame and dropped when it no longer validates (match ended).
+uint64_t findPlayerManager(const mem::Process& p, uint64_t pmKlass, uint64_t pcKlass, uint64_t& localPc,
+                           uint64_t& localOffset) {
     static uint64_t cached = 0;
     static ManagerScan scan;
     static std::vector<uint8_t> buf(1u << 20);
@@ -67,10 +132,8 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
         g_scan.addr = scan.addr;
     };
 
-    const uint64_t klass = p.read<uint64_t>(gameBase + kTypeInfoPlayerManager);
-    if (!klass) return 0;
     if (cached) {
-        if (p.read<uint64_t>(cached) == klass) return cached;
+        if (checkManager(p, cached, pcKlass, localPc, localOffset) == Check::Ok) return cached;
         cached = 0;
         scan = ManagerScan{};
     }
@@ -94,7 +157,7 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
 
     uint64_t budget = kScanBytesPerFrame;
     while (budget > 0) {
-        if (scan.region >= scan.regions.size()) {   // pass finished without a match
+        if (scan.region >= scan.regions.size()) {   // pass finished without an accepted candidate
             scan.active = false;
             scan.idle = kRescanFrames;
             publish();
@@ -114,17 +177,18 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
         for (size_t off = 0; off + 8 <= n; off += 8) {
             uint64_t v;
             std::memcpy(&v, &buf[off], 8);
-            if (v != klass) continue;
+            if (untag(v) != pmKlass) continue;
+            ++g_scan.headerHits;
             const uint64_t obj = at + off;
-            const uint64_t dict = p.read<uint64_t>(obj + kPM_Players);
-            if (!plausiblePtr(dict)) continue;
-            const int32_t count = p.read<int32_t>(dict + kDict_Count);
-            if (count < 0 || count > 4096) continue;
-            cached = obj;
-            scan.active = false;
-            ++g_scan.hits;
-            publish();
-            return obj;
+            const Check c = checkManager(p, obj, pcKlass, localPc, localOffset);
+            if (c == Check::Ok) {
+                cached = obj;
+                scan.active = false;
+                ++g_scan.hits;
+                publish();
+                return obj;
+            }
+            countCheck(c);
         }
     }
     publish();
@@ -133,8 +197,8 @@ uint64_t findPlayerManager(const mem::Process& p, uint64_t gameBase) {
 
 // World position of a player root: PlayerController -> MovementController -> translationData.
 bool playerPosition(const mem::Process& p, uint64_t pc, esp::Vec3& out) {
-    const uint64_t movement = p.read<uint64_t>(pc + kPC_Movement);
-    const uint64_t translation = movement ? p.read<uint64_t>(movement + kMC_TranslationData) : 0;
+    const uint64_t movement = readPtr(p, pc + kPC_Movement);
+    const uint64_t translation = movement ? readPtr(p, movement + kMC_TranslationData) : 0;
     return translation && p.read(translation + kTD_Position, &out, sizeof(out));
 }
 
@@ -240,6 +304,51 @@ CamScan scanCamera(const mem::Process& p, uint64_t nativeCam, esp::Vec3 head, fl
 
 ScanStats managerScanStats() { return g_scan; }
 
+std::string libBuildId(const mem::Process& p, uint64_t base) {
+    if (!base) return "(module not mapped)";
+    uint8_t eh[64];
+    if (!p.read(base, eh, sizeof(eh)) || std::memcmp(eh, "\x7f" "ELF", 4) != 0) return "(no ELF header)";
+    uint64_t phoff = 0;
+    uint16_t phentsize = 0, phnum = 0;
+    std::memcpy(&phoff, eh + 0x20, 8);
+    std::memcpy(&phentsize, eh + 0x36, 2);
+    std::memcpy(&phnum, eh + 0x38, 2);
+    for (uint16_t i = 0; i < phnum && i < 64; ++i) {
+        uint8_t ph[56];
+        if (phentsize < 56 || !p.read(base + phoff + static_cast<uint64_t>(i) * phentsize, ph, sizeof(ph))) break;
+        uint32_t type = 0;
+        std::memcpy(&type, ph, 4);
+        if (type != 4) continue;                      // PT_NOTE
+        uint64_t vaddr = 0, filesz = 0;
+        std::memcpy(&vaddr, ph + 16, 8);
+        std::memcpy(&filesz, ph + 32, 8);
+        uint8_t notes[256] = {0};
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(filesz, sizeof(notes)));
+        if (!p.read(base + vaddr, notes, n)) break;
+        size_t at = 0;
+        while (at + 12 <= n) {
+            uint32_t namesz = 0, descsz = 0, ntype = 0;
+            std::memcpy(&namesz, notes + at, 4);
+            std::memcpy(&descsz, notes + at + 4, 4);
+            std::memcpy(&ntype, notes + at + 8, 4);
+            const size_t nameAt = at + 12;
+            const size_t descAt = nameAt + ((namesz + 3u) & ~3u);
+            if (descAt + descsz > n) break;
+            if (ntype == 3 && namesz == 4 && std::memcmp(notes + nameAt, "GNU", 4) == 0) {   // NT_GNU_BUILD_ID
+                std::string hex;
+                char b[3];
+                for (uint32_t k = 0; k < descsz; ++k) {
+                    std::snprintf(b, sizeof(b), "%02x", notes[descAt + k]);
+                    hex += b;
+                }
+                return hex;
+            }
+            at = descAt + ((descsz + 3u) & ~3u);
+        }
+    }
+    return "(no build id)";
+}
+
 ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int screenH) {
     ReadResult res;
     res.snapshot.screenW = static_cast<float>(screenW);
@@ -250,22 +359,37 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
         return res;
     }
 
-    d.manager = findPlayerManager(p, gameBase);
-    if (!d.manager) {
-        res.missing = "  PlayerManager instance not found yet (match not loaded, or still searching)\n";
+    d.pmKlass = readPtr(p, gameBase + kTypeInfoPlayerManager);
+    d.pcKlass = readPtr(p, gameBase + kTypeInfoPlayerController);
+    d.pmName = className(p, d.pmKlass);
+    d.pcName = className(p, d.pcKlass);
+    if (!d.pmKlass || !d.pcKlass) {
+        res.missing = "  class pointers of PlayerManager / PlayerController are not set\n";
         return res;
     }
-    d.dumps.push_back({"manager", d.manager, 0x200});
 
-    d.localPc = p.read<uint64_t>(d.manager + kPM_LocalPlayer);
-    if (!d.localPc) {
-        res.missing = "  local player not set yet\n";
+    uint64_t localPc = 0;
+    uint64_t localOffset = 0;
+    d.manager = findPlayerManager(p, d.pmKlass, d.pcKlass, localPc, localOffset);
+    if (!d.manager) {
+        const ScanStats& s = g_scan;
+        char msg[320];
+        std::snprintf(msg, sizeof(msg),
+                      "  PlayerManager instance not found yet: header matches %llu, rejected: monitor %llu, "
+                      "flag %llu, players %llu, no local player %llu\n",
+                      static_cast<unsigned long long>(s.headerHits), static_cast<unsigned long long>(s.rejMonitor),
+                      static_cast<unsigned long long>(s.rejFlag), static_cast<unsigned long long>(s.rejPlayers),
+                      static_cast<unsigned long long>(s.rejLocal));
+        res.missing = msg;
         return res;
     }
+    d.localPc = localPc;
+    d.localOffset = localOffset;
+    d.dumps.push_back({"manager", d.manager, 0x200});
     d.dumps.push_back({"local_pc", d.localPc, 0x400});
 
-    d.movement = p.read<uint64_t>(d.localPc + kPC_Movement);
-    d.translation = d.movement ? p.read<uint64_t>(d.movement + kMC_TranslationData) : 0;
+    d.movement = readPtr(p, d.localPc + kPC_Movement);
+    d.translation = d.movement ? readPtr(p, d.movement + kMC_TranslationData) : 0;
     if (d.movement) d.dumps.push_back({"movement", d.movement, 0x200});
     if (d.translation) d.dumps.push_back({"translation", d.translation, 0x100});
 
@@ -277,11 +401,11 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
     d.localFeet = localFeet;
     d.haveLocalFeet = true;
 
-    d.mainCam = p.read<uint64_t>(d.localPc + kPC_MainCamera);
+    d.mainCam = readPtr(p, d.localPc + kPC_MainCamera);
     if (d.mainCam) d.dumps.push_back({"player_main_camera", d.mainCam, 0x100});
-    d.camera = d.mainCam ? p.read<uint64_t>(d.mainCam + kPMC_Camera) : 0;
+    d.camera = d.mainCam ? readPtr(p, d.mainCam + kPMC_Camera) : 0;
     if (d.camera) d.dumps.push_back({"camera_managed", d.camera, 0x100});
-    d.nativeCam = d.camera ? p.read<uint64_t>(d.camera + kUnityCachedPtr) : 0;
+    d.nativeCam = d.camera ? readPtr(p, d.camera + kUnityCachedPtr) : 0;
     if (d.nativeCam) d.dumps.push_back({"native_cam", d.nativeCam, kCamScanBytes});
 
     const esp::Vec3 head{localFeet.x, localFeet.y + kHeadHeight, localFeet.z};
@@ -309,7 +433,10 @@ ReadResult readFrame(const mem::Process& p, uint64_t gameBase, int screenW, int 
     res.snapshot.cameraPos = cameraPosition(cam.view);
     res.snapshot.localTeam = p.read<uint8_t>(d.localPc + kPC_Team);
 
-    const std::vector<uint64_t> pcs = dictValues(p, p.read<uint64_t>(d.manager + kPM_Players));
+    size_t skipped = 0;
+    const std::vector<uint64_t> pcs =
+        dictValues(p, readPtr(p, d.manager + kPM_Players), d.pcKlass, skipped);
+    d.skippedEntries = skipped;
     static const char* const kRemoteNames[kRemoteDumps] = {"remote_pc0", "remote_pc1"};
     std::set<int> teams;
     int sampleHp = -1;

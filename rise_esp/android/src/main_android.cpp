@@ -273,6 +273,7 @@ int main(int argc, char** argv) {
     uint64_t loggedNative = 0;
     std::string loggedStep = "start";
     int drawnPrims = 0;
+    double presentMaxMs = 0.0;   // longest eglSwapBuffers call in the period (a stall shows here)
 
     while (!status::g_quit_request.load()) {
         const double now = dbg::uptime();
@@ -316,8 +317,12 @@ int main(int argc, char** argv) {
             loggedPid = pid;
         }
         if (base != loggedBase) {
-            if (base) dbg::line("EVENT libil2cpp.so mapped at 0x%llx", ULL(base));
-            else dbg::line("EVENT libil2cpp.so not mapped");
+            if (base) {
+                dbg::line("EVENT libil2cpp.so mapped at 0x%llx", ULL(base));
+                dbg::line("EVENT libil2cpp.so build id %s", rise::libBuildId(proc, base).c_str());
+            } else {
+                dbg::line("EVENT libil2cpp.so not mapped");
+            }
             loggedBase = base;
         }
         ++frame;
@@ -405,6 +410,10 @@ int main(int argc, char** argv) {
                           "mainCam 0x%llx camera 0x%llx native 0x%llx",
                           ULL(d.manager), ULL(d.localPc), ULL(d.movement), ULL(d.translation), ULL(d.mainCam),
                           ULL(d.camera), ULL(d.nativeCam));
+                dbg::line("DETAIL classes: PlayerManager 0x%llx (%s), PlayerController 0x%llx (%s), local field 0x%llx, "
+                          "other entries not PlayerController %zu",
+                          ULL(d.pmKlass), d.pmName.c_str(), ULL(d.pcKlass), d.pcName.c_str(), ULL(d.localOffset),
+                          d.skippedEntries);
                 dbg::line("DETAIL local feet (%.3f %.3f %.3f), valid %d", d.localFeet.x, d.localFeet.y,
                           d.localFeet.z, d.haveLocalFeet ? 1 : 0);
                 dbg::line("DETAIL camera scan: perspective %d, rigid %d, nearest rigid %.3f m, view %.3f m%s, "
@@ -472,23 +481,26 @@ int main(int argc, char** argv) {
             dbg::line("SUMMARY fps %.0f, frame %.1f/%.1f ms, orient %u, landscape %d, pid %d, base 0x%llx, %s, "
                       "mgr 0x%llx, lpc 0x%llx, feet (%.2f %.2f %.2f), native 0x%llx, drawn %d, "
                       "touch downs %u last (%.0f %.0f), alpha %.2f, menu %d, swap fail %u (egl 0x%x), "
-                      "gl err %u (0x%x), state: %s",
+                      "gl err %u (0x%x), present max %.1f ms, state: %s",
                       static_cast<double>(framesInPeriod) / span, frameSum / framesInPeriod, frameMax, orientation,
                       landscape ? 1 : 0, pid, ULL(base), scanText, ULL(d.manager), ULL(d.localPc),
                       d.localFeet.x, d.localFeet.y, d.localFeet.z, ULL(d.nativeCam), drawnPrims, touchDowns,
                       static_cast<double>(touchX), static_cast<double>(touchY), static_cast<double>(alpha),
                       ui::bar::g_open ? 1 : 0, sw.swapFailures, sw.lastEglError, sw.glErrors, sw.lastGlError,
-                      state.c_str());
+                      presentMaxMs, state.c_str());
             lastSummary = now;
             frameSum = 0.0;
             frameMax = 0.0;
             framesInPeriod = 0;
             touchDowns = 0;
+            presentMaxMs = 0.0;
         }
 
         if (!touchOk) statusText += "\ntouch: no device in /dev/input, menu disabled";
         if (!statusText.empty()) drawStatus(statusText, static_cast<float>(H));
+        const double presentStart = dbg::uptime();
         overlay::endFrame();
+        presentMaxMs = std::max(presentMaxMs, (dbg::uptime() - presentStart) * 1000.0);
         usleep(8000);
     }
 

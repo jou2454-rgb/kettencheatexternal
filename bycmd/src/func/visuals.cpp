@@ -10,6 +10,7 @@
 #include "../game/math.hpp"
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
+#include "../game/weapon.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -21,6 +22,7 @@
 #include <unordered_set>
 
 extern ImFont* espFont;
+extern ImFont* weaponFont;
 
 static void esp_wait(const char* stage) {
     static long long last = 0;
@@ -96,7 +98,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -116,6 +118,7 @@ void visuals::draw() {
         purge_missing(g_last_hp, live);
         purge_missing(g_motion, live);
         purge_missing(player::g_transform_cache, live);
+        purge_missing(weapon::g_cache, live);
     }
 
     // Resolve at most one name per 100 ms. Name discovery touches several
@@ -360,6 +363,14 @@ void visuals::draw() {
             dnick(label, BoxMax, cx, font_sz, 1.f);
         }
         if (cfg::esp::distance) ddist(Enemy.distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
+        if (cfg::esp::weapon) {
+            const weapon::Info w = weapon::resolve(*Enemy.snap);
+            if (w.valid) {
+                float wy = BoxMax.y + 4.f;
+                if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
+                dweapon(w.glyph, cx, wy, std::clamp(1100.f * inv_dist, 22.f, 40.f), 1.f);
+            }
+        }
     }
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000)) {
@@ -529,6 +540,21 @@ void visuals::ddist(float dist, float x, float y, float sz, float a) {
         static_cast<int>(cfg::esp::distance_col.w * 255 * a)
     );
     draw_text_outlined(dl, espFont, sz, tp, col, txt);
+}
+
+void visuals::dweapon(char glyph, float cx, float y, float sz, float a) {
+    if (!weaponFont || a < 0.01f || !glyph) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const char txt[2] = {glyph, 0};
+    ImVec2 ts = weaponFont->CalcTextSizeA(sz, FLT_MAX, 0.f, txt);
+    ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(y));
+    ImU32 col = IM_COL32(
+        static_cast<int>(cfg::esp::weapon_col.x * 255),
+        static_cast<int>(cfg::esp::weapon_col.y * 255),
+        static_cast<int>(cfg::esp::weapon_col.z * 255),
+        static_cast<int>(cfg::esp::weapon_col.w * 255 * a)
+    );
+    draw_text_outlined(dl, weaponFont, sz, tp, col, txt);
 }
 
 void visuals::draw_text_outlined(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 color, const char* text) {

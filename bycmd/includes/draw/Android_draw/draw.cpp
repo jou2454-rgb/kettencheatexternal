@@ -9,6 +9,7 @@
 #include "Android_draw/draw.h"
 #include "fonts/menu/pixeloperator.h"
 #include "fonts/esp/esp.h"
+#include "fonts/esp/weapon.h"
 #include "fonts/menu/avatar.h"
 #include <cmath>
 #include <cstdint>
@@ -23,6 +24,7 @@ ImFont* fontBold;
 ImFont* fontMedium;
 ImFont* fontDesc;
 ImFont* espFont;
+ImFont* weaponFont = nullptr;
 ImFont* fontMenu = nullptr;
 ImFont* fontWm = nullptr;
 ImTextureID g_avatar_tex = nullptr;
@@ -132,10 +134,14 @@ bool ImGui_init() {
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = NULL;
 
-    fontBold = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 32, nullptr, io.Fonts->GetGlyphRangesCyrillic());
-    fontMedium = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, nullptr, io.Fonts->GetGlyphRangesCyrillic());
-    fontDesc = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 22, nullptr, io.Fonts->GetGlyphRangesCyrillic());
-    espFont = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), 18, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+    // Every font below lives in a static array: the atlas must not free() it
+    // on DestroyContext (FontDataOwnedByAtlas defaults to true).
+    ImFontConfig fc;
+    fc.FontDataOwnedByAtlas = false;
+    fontBold = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 32, &fc, io.Fonts->GetGlyphRangesCyrillic());
+    fontMedium = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, &fc, io.Fonts->GetGlyphRangesCyrillic());
+    fontDesc = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 22, &fc, io.Fonts->GetGlyphRangesCyrillic());
+    espFont = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), 18, &fc, io.Fonts->GetGlyphRangesCyrillic());
     // neko menu / watermark fonts: sized for the real panel (base 1224 px
     // short side, Infinix GT 30 Pro 2720x1224), so they stay crisp instead of
     // being scaled up from a small atlas glyph.
@@ -144,8 +150,12 @@ bool ImGui_init() {
         float k = short_side / 1224.f;
         if (k < 0.5f) k = 0.5f;
         if (k > 3.f) k = 3.f;
-        fontMenu = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), roundf(36.f * k), nullptr, io.Fonts->GetGlyphRangesCyrillic());
-        fontWm = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), roundf(54.f * k), nullptr, io.Fonts->GetGlyphRangesCyrillic());
+        fontMenu = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), roundf(36.f * k), &fc, io.Fonts->GetGlyphRangesCyrillic());
+        fontWm = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), roundf(54.f * k), &fc, io.Fonts->GetGlyphRangesCyrillic());
+        // Weapon icons: the font maps glyphs to 0-9 / A-O / a-z only.
+        static const ImWchar weapon_ranges[] = { 0x0020, 0x007A, 0 };
+        weaponFont = io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(weapon_raw), sizeof(weapon_raw),
+                                                    roundf(40.f * k), &fc, weapon_ranges);
     }
     if (!fontBold || !fontMedium || !fontDesc || !espFont || !fontMenu || !fontWm) {
         // The menu dereferences fontBold/fontMedium/fontDesc directly; a bad

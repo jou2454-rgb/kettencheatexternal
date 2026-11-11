@@ -1,6 +1,6 @@
 // ================================================================================
 // neko.esp menu: a compact panel anchored under the watermark.
-//   Box / Name / Health / Distance  - toggle switches
+//   Box / Name / Health / Weapon / Distance - toggle switches
 //   Color                           - one ESP colour (box, health bar, distance)
 //   unload                          - clean shutdown through status::g_quit_request
 // Everything is drawn directly on the foreground draw list; no ImGui windows,
@@ -194,13 +194,14 @@ namespace ui::menu {
         // One colour for the whole ESP (the name stays white).
         cfg::esp::health_col = cfg::esp::box_col;
         cfg::esp::distance_col = cfg::esp::box_col;
+        cfg::esp::weapon_col = cfg::esp::box_col;
 
         const float pad = 24.f * k;
         const float w = 330.f * k;
         const float row = 64.f * k;
         const float crow = 72.f * k;
         const float btn = 64.f * k;
-        const float ph = pad + row * 4.f + crow + 10.f * k + btn + 22.f * k;
+        const float ph = pad + row * 5.f + crow + 10.f * k + btn + 22.f * k;
 
         ImVec2 p(bar::g_rect_min.x - (1.f - g_ma) * 40.f * k, bar::g_rect_max.y + 14.f * k);
         if (p.y + ph > g_sh - 8.f * k) p.y = ImMax(8.f * k, g_sh - 8.f * k - ph);
@@ -224,6 +225,7 @@ namespace ui::menu {
             {"Box", &cfg::esp::box},
             {"Name", &cfg::esp::name},
             {"Health", &cfg::esp::health},
+            {"Weapon", &cfg::esp::weapon},
             {"Distance", &cfg::esp::distance},
         };
         for (const item& it : items) {

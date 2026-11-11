@@ -40,6 +40,10 @@ namespace ui::menu {
         bool g_panel_dragging = false;
         ImVec2 g_panel_press;
         ImVec2 g_panel_grab;
+        bool g_resize_active = false;
+        ImVec2 g_resize_press;
+        float g_resize_sx0 = 1.f, g_resize_sy0 = 1.f, g_resize_w0 = 1.f, g_resize_h0 = 1.f;
+        ImVec2 g_grip_min, g_grip_max;         // resize grip of this frame; taps starting there are ignored
 
         float lrp(float a, float b, float t) { return a + (b - a) * t; }
         ImVec4 lrp_col(const ImVec4& a, const ImVec4& b, float t) {
@@ -57,6 +61,7 @@ namespace ui::menu {
             if (!ImGui::IsMouseReleased(0) || g_panel_dragging || bar::g_dragging) return false;
             const ImVec2 down = io.MouseClickedPos[0];
             const ImVec2 up = io.MousePos;
+            if (inside(down, g_grip_min, g_grip_max)) return false;
             if (!inside(down, mn, mx) || !inside(up, mn, mx)) return false;
             const float thr = 10.f * style::k();
             const float dx = up.x - down.x, dy = up.y - down.y;
@@ -235,11 +240,14 @@ namespace ui::menu {
         cfg::esp::health_col = cfg::esp::box_col;
 
         const float pad = 24.f * k;
-        const float w = 330.f * k;
-        const float row = 64.f * k;
-        const float crow = 72.f * k;
-        const float btn = 64.f * k;
-        const float ph = pad + row * 4.f + crow + 10.f * k + (btn + 6.f * k) + (40.f * k + 56.f * k + 6.f * k) + btn + 6.f * k + 16.f * k;
+        const float sx = cfg::menu::scale_x, sy = cfg::menu::scale_y;
+        const float w = 330.f * k * sx;
+        const float row = 64.f * k * sy;
+        const float crow = 72.f * k * sy;
+        const float btn = 64.f * k * sy;
+        const float strow = 40.f * k * sy;      // delay value line
+        const float stepper_h = 56.f * k * sy;  // delay steppers
+        const float ph = pad + row * 4.f + crow + 10.f * k + (btn + 6.f * k) + (strow + stepper_h + 6.f * k) + btn + 6.f * k + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -250,12 +258,39 @@ namespace ui::menu {
             if (p.x + w > g_sw) p.x = ImMax(0.f, g_sw - w);
         }
 
+        // ---- resize grip, bottom-right corner: scales the panel in x and y ----
+        {
+            const ImVec2 mp = io.MousePos;
+            const float grip = 48.f * k;
+            g_grip_min = ImVec2(p.x + w - grip, p.y + ph - grip);
+            g_grip_max = ImVec2(p.x + w, p.y + ph);
+            if (!g_resize_active && !g_panel_pressed && !bar::g_dragging && g_ma > 0.6f &&
+                ImGui::IsMouseClicked(0) && inside(mp, g_grip_min, g_grip_max)) {
+                g_resize_active = true;
+                g_resize_press = mp;
+                g_resize_sx0 = sx;
+                g_resize_sy0 = sy;
+                g_resize_w0 = w;
+                g_resize_h0 = ph;
+            }
+            if (g_resize_active) {
+                if (io.MouseDown[0]) {
+                    const float dx = mp.x - g_resize_press.x, dy = mp.y - g_resize_press.y;
+                    cfg::menu::scale_x = ImClamp(g_resize_sx0 * (g_resize_w0 + dx) / g_resize_w0, 1.f, 2.5f);
+                    cfg::menu::scale_y = ImClamp(g_resize_sy0 * (g_resize_h0 + dy) / g_resize_h0, 1.f, 2.5f);
+                } else {
+                    g_resize_active = false;
+                }
+            }
+        }
+
         // ---- panel drag (press anywhere on the panel, move > threshold) ----
         {
             const ImVec2 mp = io.MousePos;
             const ImVec2 cur_max(p.x + w, p.y + ph);
             const float thr = 10.f * k;
-            if (!g_panel_pressed && !bar::g_dragging && g_ma > 0.6f && ImGui::IsMouseClicked(0) && inside(mp, p, cur_max)) {
+            if (!g_panel_pressed && !bar::g_dragging && !g_resize_active && g_ma > 0.6f && ImGui::IsMouseClicked(0) &&
+                inside(mp, p, cur_max) && !inside(mp, g_grip_min, g_grip_max)) {
                 g_panel_pressed = true;
                 g_panel_dragging = false;
                 g_panel_press = mp;
@@ -290,6 +325,10 @@ namespace ui::menu {
         dots(dl, ImVec2(p.x + 6.f * k, p.y + 6.f * k), ImVec2(pmax.x - 6.f * k, pmax.y - 6.f * k), a, k);
         dl->PopClipRect();
         dl->AddRect(p, pmax, col(clr::border_light, a), r, 0, 1.5f * k);
+        for (int i = 1; i <= 3; ++i) {
+            const float o = 8.f * k * float(i);
+            dl->AddLine(ImVec2(pmax.x - o, pmax.y - 6.f * k), ImVec2(pmax.x - 6.f * k, pmax.y - o), col(clr::text_dim, a), 1.5f * k);
+        }
 
         const float cw = w - pad * 2.f;
         // Fire-button capture: a tap outside the panel becomes the fire button.
@@ -326,12 +365,12 @@ namespace ui::menu {
             ImFont* f = menu_font();
             const float fs = f->FontSize * 0.72f;
             const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0.f, delay_text);
-            dl->AddText(f, fs, ImVec2(c.x + (cw - ts.x) * 0.5f, c.y + (40.f * k - ts.y) * 0.5f), col(clr::text_dim, a), delay_text);
-            c.y += 40.f * k;
+            dl->AddText(f, fs, ImVec2(c.x + (cw - ts.x) * 0.5f, c.y + (strow - ts.y) * 0.5f), col(clr::text_dim, a), delay_text);
+            c.y += strow;
             static const int steps[6] = {-50, -10, -1, 1, 10, 50};
             static const char* labels[6] = {"-50", "-10", "-1", "+1", "+10", "+50"};
             const float gap = 6.f * k;
-            const float mw = (cw - gap * 5.f) / 6.f, mh = 56.f * k;
+            const float mw = (cw - gap * 5.f) / 6.f, mh = stepper_h;
             for (int i = 0; i < 6; ++i) {
                 const ImVec2 mp(c.x + float(i) * (mw + gap), c.y);
                 if (mini_button(dl, labels[i], mp, mw, mh, a, k) && interactive) {

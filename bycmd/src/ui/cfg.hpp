@@ -11,6 +11,11 @@
 
 namespace cfg {
 
+namespace menu {
+    inline float scale_x = 1.f;                // panel width scale, set by the grip in the bottom-right corner
+    inline float scale_y = 1.f;                // panel height scale
+}
+
 namespace trigger {
     inline bool enabled = false;               // tap fire while the crosshair is on an enemy (triggerbot.hpp)
     inline int delay_ms = 40;                  // hold on target before the first tap

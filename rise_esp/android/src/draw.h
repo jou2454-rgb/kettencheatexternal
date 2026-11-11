@@ -1,5 +1,6 @@
 // Overlay window, EGL and ImGui for the Rise ESP. Ported from the bycmd overlay
-// (same window creator and ImGui backends), without touch, menu and watermark.
+// (same window creator and ImGui backends). The menu, watermark and touch come
+// from the bycmd source (src/ui, src/touch); their fonts and avatar live in draw.cpp.
 #pragma once
 #include <cstdint>
 #include <EGL/egl.h>

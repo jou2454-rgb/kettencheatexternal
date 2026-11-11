@@ -6,6 +6,10 @@ LOCAL_MODULE := rise_esp
 LOCAL_SRC_FILES := \
     ../src/main_android.cpp \
     ../src/draw.cpp \
+    ../src/ui/bar.cpp \
+    ../src/ui/menu.cpp \
+    ../src/ui/widgets/widgets.cpp \
+    ../src/touch/Touch.cpp \
     ../../src/esp.cpp \
     ../../src/memory.cpp \
     ../../game/rise_reader.cpp \
@@ -25,7 +29,8 @@ LOCAL_C_INCLUDES := \
     $(LOCAL_PATH)/../third_party/ImGui/backends \
     $(LOCAL_PATH)/../third_party/fonts \
     $(LOCAL_PATH)/../third_party/native_surface \
-    $(LOCAL_PATH)/../src
+    $(LOCAL_PATH)/../src \
+    $(LOCAL_PATH)/../src/ui
 
 LOCAL_CPPFLAGS := -std=c++17 -fno-rtti -fno-exceptions -O2 -Wno-error=format-security
 LOCAL_LDLIBS := -lEGL -lGLESv3 -landroid -ldl -llog

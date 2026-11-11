@@ -1,15 +1,26 @@
 #include "draw.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 
+#include "fonts/avatar.h"
 #include "fonts/esp.h"
 #include "fonts/pixeloperator.h"
+#include "ui/ui_fonts.h"
 
 // IM_ASSERT hook declared in third_party/ImGui/imconfig.h. Logs and continues, so an
 // ImGui assert never takes the overlay down.
 void rise_imgui_assert_fail(const char* expr, const char* file, int line) {
     std::fprintf(stderr, "ImGui assert failed: %s at %s:%d\n", expr, file, line);
 }
+
+// Menu and watermark font and texture (declared in ui/ui_fonts.h).
+ImFont* fontMedium = nullptr;
+ImFont* fontMenu = nullptr;
+ImFont* fontWm = nullptr;
+ImTextureID g_avatar_tex = nullptr;
 
 namespace overlay {
 
@@ -21,6 +32,7 @@ EGLDisplay g_display = EGL_NO_DISPLAY;
 EGLSurface g_surface = EGL_NO_SURFACE;
 EGLContext g_context = EGL_NO_CONTEXT;
 ANativeWindow* g_window = nullptr;
+GLuint g_avatar_gl = 0;
 int g_width = 0;
 int g_height = 0;
 
@@ -53,6 +65,27 @@ bool initEgl() {
     return eglMakeCurrent(g_display, g_surface, g_surface, g_context) == EGL_TRUE;
 }
 
+// Watermark avatar: 128x128 RGBA8 from avatar.h. Needs the EGL context to be current.
+void uploadAvatar() {
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    if (!tex) return;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, neko_avatar_w, neko_avatar_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, neko_avatar_rgba);
+    if (glGetError() == GL_NO_ERROR) {
+        g_avatar_gl = tex;
+        g_avatar_tex = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(tex));
+    } else {
+        glDeleteTextures(1, &tex);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 bool initImGui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -64,11 +97,21 @@ bool initImGui() {
     // Fonts live in static arrays: the atlas must not free them on DestroyContext.
     ImFontConfig fc;
     fc.FontDataOwnedByAtlas = false;
-    io.FontDefault = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, &fc,
-                                                    io.Fonts->GetGlyphRangesCyrillic());
+    fontMedium = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, &fc,
+                                                io.Fonts->GetGlyphRangesCyrillic());
+    io.FontDefault = fontMedium;
     espFont = io.Fonts->AddFontFromMemoryTTF(espFontData, sizeof(espFontData), 18, &fc,
                                              io.Fonts->GetGlyphRangesCyrillic());
-    return io.FontDefault != nullptr && espFont != nullptr;
+    // Menu and watermark sizes follow the overlay height (1224 px base, clamped like style::k()),
+    // so the glyphs are rasterised at their final size instead of being scaled up.
+    const float k = std::min(3.f, std::max(0.5f, float(g_height) / 1224.f));
+    fontMenu = io.Fonts->AddFontFromMemoryTTF(espFontData, sizeof(espFontData), std::round(36.f * k), &fc,
+                                              io.Fonts->GetGlyphRangesCyrillic());
+    fontWm = io.Fonts->AddFontFromMemoryTTF(espFontData, sizeof(espFontData), std::round(54.f * k), &fc,
+                                            io.Fonts->GetGlyphRangesCyrillic());
+    if (!fontMedium || !espFont || !fontMenu || !fontWm) return false;
+    uploadAvatar();
+    return true;
 }
 
 }  // namespace
@@ -84,6 +127,11 @@ bool init(int width, int height) {
 }
 
 void shutdown() {
+    if (g_avatar_gl) {
+        glDeleteTextures(1, &g_avatar_gl);
+        g_avatar_gl = 0;
+        g_avatar_tex = nullptr;
+    }
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplAndroid_Shutdown();
     ImGui::DestroyContext();

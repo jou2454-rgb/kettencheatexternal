@@ -3,6 +3,7 @@
 //   Box / Name / Health / Weapon / Distance - toggle switches
 //   Color                           - one ESP colour (box, health bar, distance)
 //   unload                          - clean shutdown through status::g_quit_request
+// Panel: tap a control = release without moving; press + move = drag the panel.
 // Everything is drawn directly on the foreground draw list; no ImGui windows,
 // so touch handling is a plain rectangle test on io.MousePos + IsMouseClicked.
 // Geometry is in base px for a 1224 px tall screen, scaled by style::k().
@@ -30,6 +31,14 @@ namespace ui::menu {
         ImVec4 g_hsv{0.f, 1.f, 1.f, 1.f}; // popup state (hue, sat, val)
         bool g_hsv_init = false;
         int g_picker = 0;                 // 0 none, 1 sat/val square, 2 hue bar
+        // Panel drag: by default the panel sits under the watermark and
+        // follows it; once the user drags the panel it keeps its own place.
+        bool g_menu_custom = false;
+        ImVec2 g_menu_pos;
+        bool g_panel_pressed = false;
+        bool g_panel_dragging = false;
+        ImVec2 g_panel_press;
+        ImVec2 g_panel_grab;
 
         float lrp(float a, float b, float t) { return a + (b - a) * t; }
         ImVec4 lrp_col(const ImVec4& a, const ImVec4& b, float t) {
@@ -38,6 +47,21 @@ namespace ui::menu {
         bool inside(const ImVec2& p, const ImVec2& mn, const ImVec2& mx) {
             return p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y;
         }
+        // A control fires on release: finger went down inside the rect and
+        // came up inside it without travelling more than the drag threshold.
+        // That is what lets the same finger drag the panel without flipping
+        // the toggle it happened to land on.
+        bool tapped(const ImVec2& mn, const ImVec2& mx) {
+            ImGuiIO& io = ImGui::GetIO();
+            if (!ImGui::IsMouseReleased(0) || g_panel_dragging || bar::g_dragging) return false;
+            const ImVec2 down = io.MouseClickedPos[0];
+            const ImVec2 up = io.MousePos;
+            if (!inside(down, mn, mx) || !inside(up, mn, mx)) return false;
+            const float thr = 10.f * style::k();
+            const float dx = up.x - down.x, dy = up.y - down.y;
+            return dx * dx + dy * dy <= thr * thr;
+        }
+
         ImFont* menu_font() { return fontMenu ? fontMenu : (fontMedium ? fontMedium : ImGui::GetFont()); }
 
         // Subtle dot grid like the reference panel.
@@ -52,10 +76,8 @@ namespace ui::menu {
 
         // Label on the left, iOS-style switch on the right. Returns true on tap.
         bool toggle_row(ImDrawList* dl, const char* label, bool* v, const ImVec2& pos, float w, float h, float a, float k) {
-            const ImVec2 mp = ImGui::GetIO().MousePos;
-            const bool hov = inside(mp, pos, ImVec2(pos.x + w, pos.y + h));
-            bool tapped = false;
-            if (hov && !g_color_open && ImGui::IsMouseClicked(0)) { *v = !*v; tapped = true; }
+            bool tap = false;
+            if (!g_color_open && tapped(pos, ImVec2(pos.x + w, pos.y + h))) { *v = !*v; tap = true; }
 
             ImFont* f = menu_font();
             dl->AddText(f, f->FontSize, ImVec2(pos.x, pos.y + (h - f->FontSize) * 0.5f), col(clr::text, a), label);
@@ -72,7 +94,7 @@ namespace ui::menu {
             const ImVec2 kc(kx, tmin.y + th * 0.5f);
             dl->AddCircleFilled(ImVec2(kc.x, kc.y + 1.5f * k), kr, IM_COL32(0, 0, 0, int(60 * a)), 24);
             dl->AddCircleFilled(kc, kr, col(lrp_col(clr::knob_off, clr::accent, t), a), 24);
-            return tapped;
+            return tap;
         }
 
         // Label + rounded colour swatch. Tap toggles the popup.
@@ -83,8 +105,7 @@ namespace ui::menu {
             const float s = 58.f * k;
             const ImVec2 smin(pos.x + w - s, pos.y + (h - s) * 0.5f);
             const ImVec2 smax(smin.x + s, smin.y + s);
-            const ImVec2 mp = ImGui::GetIO().MousePos;
-            if (inside(mp, smin, smax) && ImGui::IsMouseClicked(0)) {
+            if (tapped(smin, smax)) {
                 g_color_open = !g_color_open;
                 if (g_color_open) {
                     ImGui::ColorConvertRGBtoHSV(v->x, v->y, v->z, g_hsv.x, g_hsv.y, g_hsv.z);
@@ -101,8 +122,8 @@ namespace ui::menu {
             const ImVec2 mx(pos.x + w, pos.y + h);
             ImGuiIO& io = ImGui::GetIO();
             const bool hov = inside(io.MousePos, pos, mx);
-            const bool press = hov && !g_color_open && ImGui::IsMouseClicked(0);
-            const float ha = anim(std::string("bt_") + label, (hov && io.MouseDown[0]) ? 1.f : 0.f, 18.f);
+            const bool press = !g_color_open && tapped(pos, mx);
+            const float ha = anim(std::string("bt_") + label, (hov && io.MouseDown[0] && !g_panel_dragging) ? 1.f : 0.f, 18.f);
             const float r = 20.f * k;
             dl->AddRectFilled(ImVec2(pos.x, pos.y + 3.f * k), ImVec2(mx.x, mx.y + 3.f * k), IM_COL32(0, 0, 0, int(70 * a)), r);
             dl->AddRectFilled(pos, mx, col(lrp_col(clr::accent_dark, clr::accent_light, ha), a), r);
@@ -203,8 +224,45 @@ namespace ui::menu {
         const float btn = 64.f * k;
         const float ph = pad + row * 5.f + crow + 10.f * k + btn + 22.f * k;
 
-        ImVec2 p(bar::g_rect_min.x - (1.f - g_ma) * 40.f * k, bar::g_rect_max.y + 14.f * k);
-        if (p.y + ph > g_sh - 8.f * k) p.y = ImMax(8.f * k, g_sh - 8.f * k - ph);
+        ImVec2 p;
+        if (g_menu_custom) {
+            p = g_menu_pos;
+        } else {
+            p = ImVec2(bar::g_rect_min.x - (1.f - g_ma) * 40.f * k, bar::g_rect_max.y + 14.f * k);
+            if (p.y + ph > g_sh - 8.f * k) p.y = ImMax(8.f * k, g_sh - 8.f * k - ph);
+            if (p.x + w > g_sw) p.x = ImMax(0.f, g_sw - w);
+        }
+
+        // ---- panel drag (press anywhere on the panel, move > threshold) ----
+        {
+            const ImVec2 mp = io.MousePos;
+            const ImVec2 cur_max(p.x + w, p.y + ph);
+            const float thr = 10.f * k;
+            if (!g_panel_pressed && !bar::g_dragging && g_ma > 0.6f && ImGui::IsMouseClicked(0) && inside(mp, p, cur_max)) {
+                g_panel_pressed = true;
+                g_panel_dragging = false;
+                g_panel_press = mp;
+                g_panel_grab = ImVec2(mp.x - p.x, mp.y - p.y);
+            }
+            if (g_panel_pressed) {
+                if (io.MouseDown[0]) {
+                    const float dx = mp.x - g_panel_press.x, dy = mp.y - g_panel_press.y;
+                    if (!g_panel_dragging && g_picker == 0 && dx * dx + dy * dy > thr * thr) g_panel_dragging = true;
+                    if (g_panel_dragging) {
+                        g_menu_custom = true;
+                        g_menu_pos = ImVec2(mp.x - g_panel_grab.x, mp.y - g_panel_grab.y);
+                        g_menu_pos.x = ImClamp(g_menu_pos.x, 0.f, ImMax(0.f, g_sw - w));
+                        g_menu_pos.y = ImClamp(g_menu_pos.y, 0.f, ImMax(0.f, g_sh - ph));
+                        p = g_menu_pos;
+                    }
+                } else {
+                    g_panel_pressed = false;
+                    // keep g_panel_dragging true for this frame so release-taps are ignored
+                }
+            } else {
+                g_panel_dragging = false;
+            }
+        }
         const ImVec2 pmax(p.x + w, p.y + ph);
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -240,5 +298,6 @@ namespace ui::menu {
         }
 
         color_popup(dl, &cfg::esp::box_col, p, pmax, a, k);
+        if (!g_panel_pressed) g_panel_dragging = false;
     }
 }

@@ -123,13 +123,29 @@ namespace weapon {
         return out;
     }
 
-    // Exact key match only: a nickname such as "m4killer" must not become an M4.
-    inline const entry* lookup(const std::string& raw) {
-        const std::string key = normalize(raw);
+    inline const entry* lookup_key(const std::string& key) {
         if (key.empty() || key.size() > 16) return nullptr;
         for (const entry& e : k_table)
             if (key == e.key) return &e;
         return nullptr;
+    }
+
+    // Whole string first ("AKR"), then alphanumeric tokens ("wpn_akr12_skin03(Clone)"
+    // -> wpn, akr12, skin03, clone). Tokens shorter than 2 are ignored.
+    inline const entry* match_text(const std::string& raw) {
+        if (const entry* e = lookup_key(normalize(raw))) return e;
+        std::string token;
+        const entry* found = nullptr;
+        auto flush = [&]() {
+            if (token.size() >= 2 && !found) found = lookup_key(token);
+            token.clear();
+        };
+        for (unsigned char ch : raw) {
+            if (std::isalnum(ch)) token.push_back(char(std::tolower(ch)));
+            else flush();
+        }
+        flush();
+        return found;
     }
 
     struct cache_entry {
@@ -137,6 +153,7 @@ namespace weapon {
         uint64_t part{0};
         long long checked_ms{0};
         long long probe_ms{0};
+        long long dump_ms{0};
     };
     inline std::unordered_map<uint64_t, cache_entry> g_cache;
 
@@ -155,22 +172,68 @@ namespace weapon {
         return 0;
     }
 
-    // Scan an object's first 24 reference fields (depth 2) for a weapon name.
-    inline const entry* scan_object(uint64_t object, uint64_t string_class, int depth,
-                                    std::string* seen, int& seen_count) {
-        if (!obj_ptr(object)) return nullptr;
+    // Native UnityEngine.Object name. HYPOTHESIS: managed wrapper +0x10
+    // (m_CachedPtr) -> native object, native +0x30 -> char* name (the layout
+    // most Android Unity externals use for GameObject/Component names). Every
+    // step is validated; a miss returns an empty string.
+    inline std::string native_name(uint64_t managed) {
+        const uint64_t native = rpm<uint64_t>(managed + v100::unity_cached_ptr);
+        if (!plausible(native) || native < 0x10000) return {};
+        const uint64_t name_ptr = rpm<uint64_t>(native + 0x30);
+        if (!plausible(name_ptr) || name_ptr < 0x10000) return {};
+        char buf[48]{};
+        if (!mem_read(name_ptr, buf, sizeof(buf) - 1)) return {};
+        std::string out;
+        for (char ch : buf) {
+            if (ch == 0) break;
+            if (ch < 0x20 || ch > 0x7E) return {};
+            out.push_back(ch);
+        }
+        if (out.size() < 2 || out.size() >= sizeof(buf) - 1) return {};
+        return out;
+    }
+
+    inline int ImMaxBudget(int remaining) { return remaining < 200 ? 200 : remaining; }
+
+    struct scan_ctx {
+        uint64_t string_class{0};
+        int budget{0};              // remaining object reads
+        std::string seen[12];
+        int seen_count{0};
+        const char* source{""};
+    };
+
+    inline void note(scan_ctx& ctx, const char* kind, int field, int depth, const std::string& text) {
+        if (ctx.seen_count >= 12 || text.size() > 28) return;
+        char prefix[48];
+        std::snprintf(prefix, sizeof(prefix), "%s d%d+0x%x %s:", ctx.source, depth, 0x10 + field * 8, kind);
+        ctx.seen[ctx.seen_count++] = std::string(prefix) + text;
+    }
+
+    // Scan an object's first 24 reference fields for a weapon name: managed
+    // strings, native Unity names, then nested objects while depth remains.
+    inline const entry* scan_object(uint64_t object, int depth, scan_ctx& ctx) {
+        if (!obj_ptr(object) || ctx.budget <= 0) return nullptr;
+        --ctx.budget;
         uint64_t fields[24]{};
         if (!mem_read(object + 0x10, fields, sizeof(fields))) return nullptr;
-        for (uint64_t value : fields) {
+        for (int i = 0; i < 24; ++i) {
+            const uint64_t value = fields[i];
             if (!obj_ptr(value)) continue;
-            const std::string text = read_managed_string(value, string_class);
+            const std::string text = read_managed_string(value, ctx.string_class);
             if (!text.empty()) {
-                if (const entry* e = lookup(text)) return e;
-                if (seen && seen_count < 8 && text.size() <= 24) seen[seen_count++] = text;
+                if (const entry* e = match_text(text)) return e;
+                note(ctx, "str", i, depth, text);
                 continue;
             }
+            const std::string name = native_name(value);
+            if (!name.empty()) {
+                if (const entry* e = match_text(name)) return e;
+                note(ctx, "obj", i, depth, name);
+            }
             if (depth > 1) {
-                if (const entry* e = scan_object(value, string_class, depth - 1, seen, seen_count)) return e;
+                if (const entry* e = scan_object(value, depth - 1, ctx)) return e;
+                if (ctx.budget <= 0) break;
             }
         }
         return nullptr;
@@ -183,35 +246,53 @@ namespace weapon {
         c.checked_ms = now;
 
         const uint64_t known_string = rpm<uint64_t>(proc::lib + v100::player_string_literal);
-        const uint64_t string_class = plausible(known_string) ? rpm<uint64_t>(known_string) : 0;
+        scan_ctx ctx;
+        ctx.string_class = plausible(known_string) ? rpm<uint64_t>(known_string) : 0;
+        ctx.budget = 600;
+
         const uint64_t part = find_part(p.object);
-        if (!string_class || !part) {
-            if (c.info.valid) diag::log("WEAPON", "object=0x%llx weapon part lost", (unsigned long long)p.object);
-            c.info = {};
-            c.part = part;
-            if (diag::every(c.probe_ms, 10000))
-                diag::log("WEAPON", "object=0x%llx no uyg part (string class=0x%llx)",
-                          (unsigned long long)p.object, (unsigned long long)string_class);
-            return c.info;
+        const entry* e = nullptr;
+
+        // 1. WeaponPart itself, three levels deep.
+        if (part) { ctx.source = "uyg"; e = scan_object(part, 3, ctx); }
+        // 2. Presentation component chc (holds a uyg reference and animation state).
+        if (!e) {
+            const uint64_t chc = find_player_component(p.object, typeinfo(v100::presentation_typeinfo));
+            if (chc) { ctx.source = "chc"; ctx.budget = ImMaxBudget(ctx.budget); e = scan_object(chc, 2, ctx); }
+        }
+        // 3. odq+0x88: the only unidentified pointer-sized slot between dvp (+0x80) and team (+0x90).
+        if (!e) {
+            const uint64_t slot = rpm<uint64_t>(p.object + 0x88);
+            if (obj_ptr(slot)) { ctx.source = "odq+88"; ctx.budget = ImMaxBudget(ctx.budget); e = scan_object(slot, 2, ctx); }
         }
 
-        std::string seen[8];
-        int seen_count = 0;
-        const entry* e = scan_object(part, string_class, 2, seen, seen_count);
         Info next{};
         if (e) { next.glyph = e->glyph; next.name = e->name; next.valid = true; }
 
-        if (next.valid != c.info.valid || next.glyph != c.info.glyph || part != c.part) {
-            if (next.valid)
-                diag::log("WEAPON", "object=0x%llx part=0x%llx weapon=%s glyph='%c'",
-                          (unsigned long long)p.object, (unsigned long long)part, next.name, next.glyph);
-        }
+        if (next.valid && (!c.info.valid || next.glyph != c.info.glyph))
+            diag::log("WEAPON", "object=0x%llx part=0x%llx weapon=%s glyph='%c' via %s",
+                      (unsigned long long)p.object, (unsigned long long)part, next.name, next.glyph, ctx.source);
+        if (!next.valid && c.info.valid)
+            diag::log("WEAPON", "object=0x%llx weapon lost (part=0x%llx)", (unsigned long long)p.object, (unsigned long long)part);
+
         if (!next.valid && diag::every(c.probe_ms, 5000)) {
             std::string joined;
-            for (int i = 0; i < seen_count; ++i) { if (i) joined += " | "; joined += seen[i]; }
-            diag::log("WEAPON", "probe object=0x%llx part=0x%llx no match; strings: %s",
+            for (int i = 0; i < ctx.seen_count; ++i) { if (i) joined += " | "; joined += ctx.seen[i]; }
+            diag::log("WEAPON", "probe object=0x%llx part=0x%llx strclass=0x%llx no match; seen: %s",
                       (unsigned long long)p.object, (unsigned long long)part,
-                      joined.empty() ? "(none)" : joined.c_str());
+                      (unsigned long long)ctx.string_class, joined.empty() ? "(none)" : joined.c_str());
+        }
+        // Raw field dump of uyg once per 30 s per player: enough to pin the
+        // layout offline (pointers vs. small ints vs. floats).
+        if (part && diag::every(c.dump_ms, 30000)) {
+            uint64_t q[16]{};
+            if (mem_read(part, q, sizeof(q))) {
+                char line[16 * 19 + 1];
+                int used = 0;
+                for (int i = 0; i < 16 && used < int(sizeof(line)) - 20; ++i)
+                    used += std::snprintf(line + used, sizeof(line) - size_t(used), "%s%llx", i ? " " : "", (unsigned long long)q[i]);
+                diag::log("WEAPON", "uyg dump object=0x%llx part=0x%llx: %s", (unsigned long long)p.object, (unsigned long long)part, line);
+            }
         }
         c.info = next;
         c.part = part;

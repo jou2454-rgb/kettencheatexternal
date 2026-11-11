@@ -15,7 +15,7 @@ constexpr float kNameLift = 8.f;              // px above the box
 
 void buildEsp(const Snapshot& s, const Config& c, DrawList& out) {
     for (const Player& p : s.players) {
-        if (p.local || !p.alive || p.team == s.localTeam) continue;
+        if (p.local || !p.alive || (s.teamFilter && p.team == s.localTeam)) continue;
         if (length(p.feet - s.cameraPos) > c.maxDistance) continue;
 
         Vec2 headS, feetS;
@@ -38,7 +38,7 @@ void buildEsp(const Snapshot& s, const Config& c, DrawList& out) {
             r.color = c.boxColor;
             out.push_back(r);
         }
-        if (c.health) {
+        if (c.health && p.hpKnown) {
             const float frac = p.maxHp > 0
                 ? std::clamp(static_cast<float>(p.hp) / static_cast<float>(p.maxHp), 0.f, 1.f)
                 : 0.f;

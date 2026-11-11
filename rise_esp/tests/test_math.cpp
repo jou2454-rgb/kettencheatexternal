@@ -127,7 +127,45 @@ static void testSkeleton() {
     CHECK(lines == 2);
 }
 
+static void testUnknownHealthAndTeams() {
+    const float W = 1920.f, H = 1080.f;
+    Snapshot snap;
+    snap.viewProj = makeViewProj(W, H);
+    snap.cameraPos = Vec3{0, 0, 10};
+    snap.screenW = W;
+    snap.screenH = H;
+    snap.localTeam = 1;
+
+    Player enemy;
+    enemy.id = 1; enemy.team = 2; enemy.alive = true; enemy.hpKnown = false;   // health offset unverified
+    enemy.feet = Vec3{0, -0.9f, 0}; enemy.head = Vec3{0, 0.9f, 0};
+    Player mate = enemy;  mate.id = 2; mate.team = 1; mate.hpKnown = true; mate.hp = 80; mate.maxHp = 100;
+    snap.players = {enemy, mate};
+
+    Config cfg;
+    cfg.skeleton = false;
+    DrawList out;
+    buildEsp(snap, cfg, out);
+    int rects = 0, bars = 0;
+    for (const Prim& p : out) {
+        if (p.kind == Kind::Rect) ++rects;
+        if (p.kind == Kind::Bar) ++bars;
+    }
+    CHECK(rects == 1 && bars == 0);      // mate skipped as teammate; enemy drawn without a health bar
+
+    snap.teamFilter = false;             // team values give no split: everybody is drawn
+    out.clear();
+    buildEsp(snap, cfg, out);
+    rects = bars = 0;
+    for (const Prim& p : out) {
+        if (p.kind == Kind::Rect) ++rects;
+        if (p.kind == Kind::Bar) ++bars;
+    }
+    CHECK(rects == 2 && bars == 1);
+}
+
 int main() {
+    testUnknownHealthAndTeams();
     testProjection();
     testPerspectiveFov();
     testBuilder();

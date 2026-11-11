@@ -15,6 +15,7 @@ struct Player {
     int team = 0;
     bool local = false;
     bool alive = false;
+    bool hpKnown = true;         // false when the health value is implausible: no health bar
     int hp = 0;
     int maxHp = 100;
     Vec3 feet{};                 // world space, ground point
@@ -28,6 +29,7 @@ struct Snapshot {
     float screenW = 1920.f;
     float screenH = 1080.f;
     int localTeam = 0;
+    bool teamFilter = true;      // false: nobody is skipped as a teammate (team values give no split)
     std::vector<Player> players;
 };
 

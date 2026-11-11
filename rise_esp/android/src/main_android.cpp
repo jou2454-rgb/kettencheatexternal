@@ -1,6 +1,6 @@
 // Rise ESP overlay: attaches to the game, reads one frame per loop and draws the
 // ESP primitives on the overlay window. The cloudhack watermark and menu (ported
-// from the bycmd source) sit on top; they fade in while the game runs.
+// from the bycmd source) sit on top; they fade in while the game runs in landscape.
 // Usage (as root): rise_esp [package name]
 // Without an argument the StandRise package is used.
 #include <dirent.h>
@@ -144,30 +144,55 @@ int main(int argc, char** argv) {
     // The menu and the watermark size themselves from the landscape overlay (style::k() reads g_sh).
     g_sw = static_cast<float>(W);
     g_sh = static_cast<float>(H);
-    if (!touch::init(W, H, static_cast<uint8_t>(info.orientation)))
-        std::fprintf(stderr, "no touch device readable in /dev/input; the menu cannot be operated\n");
+
+    // Display rotation: touch mapping follows it (as in bycmd); the overlay itself stays W x H.
+    uint32_t orientation = info.orientation;
+    const bool touchOk = touch::init(W, H, static_cast<uint8_t>(orientation));
+    if (!touchOk) std::fprintf(stderr, "no touch device readable in /dev/input; the menu cannot be operated\n");
+    std::fprintf(stderr, "display %dx%d orientation %u touch %s\n", info.width, info.height, orientation,
+                 touchOk ? "ok" : "none");
 
     mem::Process proc;
     int pid = 0;
     uint64_t base = 0;
     int retry = 0;
     float alpha = 0.f;   // watermark and menu fade with the game, as in the bycmd overlay
+    unsigned frame = 0;
     while (!status::g_quit_request.load()) {
-        if (pid <= 0 || kill(pid, 0) != 0) {
+        // Rotation is read every 16 frames (about 0.1 s); a change switches the touch mapping.
+        if (frame % 16 == 0) {
+            const auto now = overlay::displayInfo();
+            const uint32_t current = static_cast<uint32_t>(now.orientation);
+            if (now.width > 0 && now.height > 0 && current != orientation) {
+                orientation = current;
+                touch::updateOrientation(static_cast<uint8_t>(orientation));
+                std::fprintf(stderr, "display orientation changed to %u\n", orientation);
+            }
+        }
+        const bool landscape = orientation == 1 || orientation == 3;   // rotation 90 / 270
+
+        // The game is looked up once a second: /proc scans are slow.
+        if (pid > 0 && kill(pid, 0) != 0) {
+            pid = 0;
+            base = 0;
+        }
+        if (pid <= 0 && frame % 60 == 0) {
             pid = findPid(package);
             base = 0;
             retry = 0;
             if (pid > 0 && !proc.attach(pid)) pid = 0;
         }
         if (pid > 0 && base == 0 && (retry++ % 60) == 0) base = proc.moduleBase("libil2cpp.so");
+        ++frame;
 
         overlay::beginFrame();
         {
             ImGuiIO& io = ImGui::GetIO();
             float dt = io.DeltaTime;
             if (dt <= 0.f || dt > 0.1f) dt = 0.016f;
-            const float target = pid > 0 ? 1.f : 0.f;
-            const float speed = pid > 0 ? 4.f : 6.f;
+            const bool running = landscape && pid > 0;
+            const float target = running ? 1.f : 0.f;
+            const float speed = running ? 4.f : 6.f;
             if (alpha < target) alpha = std::min(target, alpha + dt * speed);
             else if (alpha > target) alpha = std::max(target, alpha - dt * speed);
             ui::bar::set_game_alpha(alpha);
@@ -175,20 +200,24 @@ int main(int argc, char** argv) {
         }
 
         std::string statusText;
-        if (pid <= 0) {
+        if (!landscape) {
+            statusText = "rotate the phone to landscape (display orientation " + std::to_string(orientation) + ")";
+        } else if (pid <= 0) {
             statusText = std::string("waiting for ") + package;
         } else if (base == 0) {
             statusText = "libil2cpp.so is not mapped yet";
         } else {
-            const rise::ReadResult frame = rise::readFrame(proc, base, W, H);
-            if (frame.ready) {
+            const rise::ReadResult res = rise::readFrame(proc, base, W, H);
+            if (res.ready) {
                 esp::DrawList out;
-                esp::buildEsp(frame.snapshot, espConfigFromMenu(), out);
+                esp::buildEsp(res.snapshot, espConfigFromMenu(), out);
                 drawPrimitives(out);
+                statusText = res.info;
             } else {
-                statusText = "not ready:\n" + frame.missing;
+                statusText = "not ready:\n" + res.missing;
             }
         }
+        if (!touchOk) statusText += "\ntouch: no device in /dev/input, menu disabled";
         if (!statusText.empty()) drawStatus(statusText, static_cast<float>(H));
         overlay::endFrame();
         usleep(8000);

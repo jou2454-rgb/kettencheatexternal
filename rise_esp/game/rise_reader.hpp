@@ -10,6 +10,7 @@ namespace rise {
 struct ReadResult {
     bool ready = false;          // false until every FILL item in rise_layout.hpp is set
     std::string missing;         // what is still needed (empty when ready)
+    std::string info;            // one line when ready: player count, teams, health sample
     esp::Snapshot snapshot;      // valid when ready
 };
 

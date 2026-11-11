@@ -11,7 +11,6 @@
 #include "../game/player.hpp"
 #include "../game/camera.hpp"
 #include "../game/weapon.hpp"
-#include "../game/skeleton.hpp"
 #include "../ui/theme/theme.hpp"
 #include "../ui/cfg.hpp"
 #include "../other/crash.hpp"
@@ -99,7 +98,7 @@ namespace {
 
 void visuals::draw() {
     if (!(g_sw >= 2.f) || !(g_sh >= 2.f)) return;
-    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon || cfg::esp::skeleton;
+    bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance || cfg::esp::weapon;
     if (!any) { esp_wait("all ESP options disabled"); return; }
 
     crash::stage("esp-players");
@@ -120,7 +119,6 @@ void visuals::draw() {
         purge_missing(g_motion, live);
         purge_missing(player::g_transform_cache, live);
         purge_missing(weapon::g_cache, live);
-        purge_missing(skeleton::g_topo, live);
     }
 
     // Resolve at most one name per 100 ms. Name discovery touches several
@@ -367,24 +365,18 @@ void visuals::draw() {
             const auto found = g_name_cache.find(Enemy.object);
             const char* label = found != g_name_cache.end() && !found->second.name.empty()
                 ? found->second.name.c_str() : "Enemy";
-            // Nick sits above the head: dnick puts its top at box_max.y + 4.
-            const ImVec2 nick_ts = espFont ? espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, label) : ImVec2(0.f, 0.f);
-            dnick(label, ImVec2(BoxMax.x, BoxMin.y - 8.f - nick_ts.y), cx, font_sz, 1.f);
+            dnick(label, BoxMax, cx, font_sz, 1.f);
         }
         if (cfg::esp::distance) ddist(Enemy.distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
         if (cfg::esp::weapon) {
             const weapon::Info w = weapon::resolve(*Enemy.snap);
             if (w.valid && w.glyph) {
-                const float wy = BoxMax.y + 4.f;
+                float wy = BoxMax.y + 4.f;
+                if (cfg::esp::name && espFont) wy += espFont->CalcTextSizeA(font_sz, FLT_MAX, 0.f, "A").y + 2.f;
                 // Icon never wider than the box and never taller than a quarter of it.
                 dweapon(w.glyph, w.raw, cx, wy, std::clamp(900.f * inv_dist, 16.f, 34.f), bw * 2.f, 1.f);
             }
         }
-    }
-    if (cfg::esp::skeleton) {
-        crash::stage("esp-skeleton");
-        for (const auto& Enemy : frame_enemies)
-            skeleton::draw(Enemy.object, ViewMatrix, ProjectionMatrix, cfg::esp::skeleton_col);
     }
     static long long frame_log = 0;
     if (diag::every(frame_log, 5000)) {
@@ -507,6 +499,17 @@ void visuals::dhp(int hp, int max_hp, const ImVec2& t, const ImVec2& b, float bo
         dl->AddRectFilledMultiColor(ImVec2(bx, fill_top), ImVec2(bx + bw, bot_y), col_top, col_top, col_bot, col_bot);
     }
 
+    if (hp < max_hp && espFont && bh > 20.f) {
+        char txt[8];
+        snprintf(txt, sizeof(txt), "%d", hp);
+        float fs = 10.f;
+        ImVec2 ts = espFont->CalcTextSizeA(fs, FLT_MAX, 0.f, txt);
+        float tx = roundf(bx + (bw - ts.x) * 0.5f);
+        float ty = roundf(fill_top - ts.y * 0.5f);
+        if (ty < top_y) ty = top_y;
+        if (ty + ts.y > bot_y) ty = bot_y - ts.y;
+        draw_text_outlined(dl, espFont, fs, ImVec2(tx, ty), IM_COL32(255, 255, 255, (int)(255 * a)), txt);
+    }
 }
 
 void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz, float a) {

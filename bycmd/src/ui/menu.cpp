@@ -224,7 +224,7 @@ namespace ui::menu {
         const float crow = 72.f * k;
         const float btn = 64.f * k;
         const float info_h = 34.f * k;   // "my weapon: #N" calibration line
-        const float ph = pad + row * 6.f + crow + 10.f * k + btn + 6.f * k + info_h + 16.f * k;
+        const float ph = pad + row * 5.f + crow + 10.f * k + btn + 6.f * k + info_h + 16.f * k;
 
         ImVec2 p;
         if (g_menu_custom) {
@@ -287,7 +287,6 @@ namespace ui::menu {
             {"Health", &cfg::esp::health},
             {"Weapon", &cfg::esp::weapon},
             {"Distance", &cfg::esp::distance},
-            {"Skeleton", &cfg::esp::skeleton},
         };
         for (const item& it : items) {
             bool v = *it.value;

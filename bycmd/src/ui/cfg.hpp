@@ -12,13 +12,11 @@
 namespace cfg {
 
 namespace esp {
-    inline bool box = false;        // reference look: skeleton + bar + name, no box
-    inline bool name = true;        // nick above the head
-    inline bool health = true;      // bar left of the figure
+    inline bool box = true;
+    inline bool name = false;
+    inline bool health = true;
     inline bool distance = false;
-    inline bool weapon = true;      // weapon icon under the feet (weapon.hpp)
-    inline bool skeleton = true;    // bone lines from the player transform hierarchy (skeleton.hpp)
-    inline ImVec4 skeleton_col = ImVec4(240/255.f, 64/255.f, 90/255.f, 1.f);
+    inline bool weapon = true;      // weapon icon under the box (weapon.hpp)
     inline int box_type = 0;
     inline float box_rounding = 0.f;
     // Interpolate enemy positions between game frames (one game frame of

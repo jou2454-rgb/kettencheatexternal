@@ -1,5 +1,6 @@
 // Rise ESP overlay: attaches to the game, reads one frame per loop and draws the
-// ESP primitives on the overlay window. Usage (as root): rise_esp <package name>
+// ESP primitives on the overlay window. Usage (as root): rise_esp [package name]
+// Without an argument the StandRise package is used.
 #include <dirent.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -18,6 +19,8 @@
 #include "mem/memory.hpp"
 
 namespace {
+
+constexpr const char* kDefaultPackage = "com.SKITLSE.StandRise";
 
 // Pid of the process whose cmdline equals the package name, 0 if not running.
 int findPid(const char* package) {
@@ -93,11 +96,7 @@ void drawStatus(const std::string& text) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: rise_esp <package name>\n");
-        return 1;
-    }
-    const char* package = argv[1];
+    const char* package = argc >= 2 ? argv[1] : kDefaultPackage;
 
     const auto info = overlay::displayInfo();
     const int W = std::max(info.width, info.height);

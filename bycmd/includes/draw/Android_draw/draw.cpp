@@ -158,7 +158,7 @@ bool ImGui_init() {
     }
     io.FontDefault = fontMedium;
 
-    // Watermark avatar: 64x64 RGBA8 from avatar.h uploaded as a GL texture.
+    // Watermark avatar: 128x128 RGBA8 from avatar.h uploaded as a GL texture.
     // The EGL context is current here (init_egl ran before ImGui_init).
     {
         GLuint tex = 0;
